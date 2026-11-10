@@ -3237,10 +3237,10 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
 }
 
 // Non-indexed indirect arguments may be GPU-written. Native Vulkan topologies
-// consume the actual backing buffer. QUADS require an ordered 16-byte readback,
-// then the established direct-draw index expansion; never reinterpret QUADS as
-// a triangle-list draw or read the stale guest VA. This synchronous fallback is
-// deliberately bounded and logged; it is correctness work, not a speedup.
+// consume the actual backing buffer. QUADS are converted on the GPU (vk_quad_indirect_prepare) for programs of a
+// vertex and a fragment stage; anything else takes an ordered 16-byte readback, then the established direct-draw index
+// expansion; never reinterpret QUADS as a triangle-list draw or read the stale guest VA. The readback submits and
+// waits for the GPU once per draw: a fight's ~150 such draws a frame cost ~30 ms (gpu_quads_graphics below).
 // Why gpu_quads_draw declined a draw (QF_*): the readback fallback costs a full GPU round trip per draw, so each
 // reason is counted and its first occurrences are logged with the stage involved (quads_fallback_log).
 enum { QF_DISABLED = 1, QF_NO_PROGRAM, QF_LOOKUP, QF_STAGE, QF_NOT_NVN2, QF_NO_VERTEX, QF_RESOLVE, QF_PREPARE, QF_N };
@@ -3261,7 +3261,10 @@ static int gpu_quads_graphics(const VkExec *ex, int *why, int *why_stage) {
     *why_stage = -1;
     if (!ex || !ex->prog) return *why = QF_NO_PROGRAM, 0;
     int vertex = 0;
-    for (int stage = GFX_STAGE_VS; stage <= GFX_STAGE_FS; stage++) {
+    // program_stage_source and program_stage_lookup take NVN stage numbers (program_stage_info: 0 VS, 1 FS, 2 GS,
+    // 3 TCS, 4 TES), not GFX_STAGE_*. Looping over GFX_STAGE_VS..GFX_STAGE_FS read the fragment shader as stage 1 and
+    // declined every program that has one, so no QUADS draw ever took the GPU path in the game.
+    for (int stage = NVN_STAGE_VS; stage <= 4; stage++) {
         const prog_t *source = program_stage_source(ex, stage);
         if (!source) continue;
         NVNshaderData shader = {0};
@@ -3270,9 +3273,9 @@ static int gpu_quads_graphics(const VkExec *ex, int *why, int *why_stage) {
         if (!found) continue;
         // bound_stage exposes legacy-shaped lowered controls. Admission needs
         // the original immutable NVN2 control, not that derived representation.
-        if (stage != GFX_STAGE_VS && stage != GFX_STAGE_FS) return *why = QF_STAGE, *why_stage = stage, 0;
+        if (stage != NVN_STAGE_VS && stage != NVN_STAGE_FS) return *why = QF_STAGE, *why_stage = stage, 0;
         if (!gfx_shader_is_nvn2(shader.control)) return *why = QF_NOT_NVN2, *why_stage = stage, 0;
-        if (stage == GFX_STAGE_VS) vertex = 1;
+        if (stage == NVN_STAGE_VS) vertex = 1;
     }
     if (!vertex) *why = QF_NO_VERTEX;
     return vertex;
