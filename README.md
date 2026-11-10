@@ -1,7 +1,7 @@
 # Hyrule Warriors AOI Recomp Optimized
 
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
-[![Content guard](https://github.com/LibertyPrime27/hwaoi-recomp/actions/workflows/content-guard.yml/badge.svg)](https://github.com/LibertyPrime27/hwaoi-recomp/actions/workflows/content-guard.yml)
+[![Content guard](https://github.com/LibertyPrime27/Hyrule-Warriors-AOI-Recomp-Optimized/actions/workflows/content-guard.yml/badge.svg)](https://github.com/LibertyPrime27/Hyrule-Warriors-AOI-Recomp-Optimized/actions/workflows/content-guard.yml)
 
 **Hyrule Warriors AOI Recomp Optimized** is a static recompilation of *Hyrule Warriors: Age of Imprisonment* (Nintendo Switch 2) into a native Windows x86-64 game with a Vulkan renderer. It continues earlier recomp work and adds:
 
@@ -89,7 +89,7 @@ The 30 / 60 / 90 / 120 FPS settings are available, both in the compiler (**Allow
 
 ## Using it
 
-1. **Get the compiler.** Download the ZIP from the [latest release](https://github.com/LibertyPrime27/hwaoi-recomp/releases/latest) and extract the whole ZIP to a writable folder. Python, the C/C++ toolchain and the shader translator are bundled, so nothing else needs installing.
+1. **Get the compiler.** Download the ZIP from the [latest release](https://github.com/LibertyPrime27/Hyrule-Warriors-AOI-Recomp-Optimized/releases/latest) and extract the whole ZIP to a writable folder. Python, the C/C++ toolchain and the shader translator are bundled, so nothing else needs installing.
 2. **Open Hyrule Warriors AOI Recomp Optimized Compiler.exe.** Select your own matching game **NUP** (and optionally an update or DLC NUP), choose an output folder, then click **Compile / update**.
 3. **Click Open compiled game** when the build finishes.
 
@@ -126,7 +126,7 @@ Validation includes:
 
 A successful generation and build alone do not prove playthrough coverage.
 
-For an [issue report](https://github.com/LibertyPrime27/hwaoi-recomp/issues), include:
+When reporting a problem, include:
 
 - the commit
 - your GPU and CPU
