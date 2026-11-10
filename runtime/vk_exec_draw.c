@@ -3241,21 +3241,40 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
 // then the established direct-draw index expansion; never reinterpret QUADS as
 // a triangle-list draw or read the stale guest VA. This synchronous fallback is
 // deliberately bounded and logged; it is correctness work, not a speedup.
-static int gpu_quads_graphics(const VkExec *ex) {
-    if (!ex || !ex->prog) return 0;
+// Why gpu_quads_draw declined a draw (QF_*): the readback fallback costs a full GPU round trip per draw, so each
+// reason is counted and its first occurrences are logged with the stage involved (quads_fallback_log).
+enum { QF_DISABLED = 1, QF_NO_PROGRAM, QF_LOOKUP, QF_STAGE, QF_NOT_NVN2, QF_NO_VERTEX, QF_RESOLVE, QF_PREPARE, QF_N };
+static const char *const qf_name[QF_N] = {"", "disabled", "no program", "stage lookup failed", "non-VS/FS stage",
+                                          "shader not NVN2", "no vertex stage", "arguments not resolvable",
+                                          "conversion setup failed"};
+static volatile uint64_t qf_count[QF_N];
+
+static void quads_fallback_log(int why, int stage, uint64_t ind) {
+    static volatile uint32_t logged;
+    uint64_t n = __atomic_add_fetch(&qf_count[why], 1, __ATOMIC_RELAXED);
+    if (__atomic_add_fetch(&logged, 1, __ATOMIC_RELAXED) <= 16 || !(n & (n - 1)))   // first 16, then at powers of two
+        rt_log("vk: QUADS indirect draw at %#llx falls back to an ordered readback: %s (stage %d); %llu so far for this "
+               "reason", (unsigned long long)ind, qf_name[why], stage, (unsigned long long)n);
+}
+
+static int gpu_quads_graphics(const VkExec *ex, int *why, int *why_stage) {
+    *why_stage = -1;
+    if (!ex || !ex->prog) return *why = QF_NO_PROGRAM, 0;
     int vertex = 0;
     for (int stage = GFX_STAGE_VS; stage <= GFX_STAGE_FS; stage++) {
         const prog_t *source = program_stage_source(ex, stage);
         if (!source) continue;
         NVNshaderData shader = {0};
         int found = program_stage_lookup(source, (unsigned)stage, &shader);
-        if (found < 0) return 0;
+        if (found < 0) return *why = QF_LOOKUP, *why_stage = stage, 0;
         if (!found) continue;
         // bound_stage exposes legacy-shaped lowered controls. Admission needs
         // the original immutable NVN2 control, not that derived representation.
-        if ((stage != GFX_STAGE_VS && stage != GFX_STAGE_FS) || !gfx_shader_is_nvn2(shader.control)) return 0;
+        if (stage != GFX_STAGE_VS && stage != GFX_STAGE_FS) return *why = QF_STAGE, *why_stage = stage, 0;
+        if (!gfx_shader_is_nvn2(shader.control)) return *why = QF_NOT_NVN2, *why_stage = stage, 0;
         if (stage == GFX_STAGE_VS) vertex = 1;
     }
+    if (!vertex) *why = QF_NO_VERTEX;
     return vertex;
 }
 
@@ -3265,13 +3284,16 @@ static int gpu_quads_draw(VkExec *ex, const p_draw_ind *d) {
         const char *value = cfg_get("TOTK_GPU_QUADS");
         enabled = value && !strcmp(value, "ab") ? 2 : value ? !strcmp(value, "1") : RT_TARGET_HWAOI;
     }
-    if (!enabled || (enabled == 2 && !rt_ab()) || !gpu_quads_graphics(ex)) return 0;
+    int why = 0, stage = -1;
+    if (!enabled || (enabled == 2 && !rt_ab())) return quads_fallback_log(QF_DISABLED, -1, d->ind), 0;
+    if (!gpu_quads_graphics(ex, &why, &stage)) return quads_fallback_log(why, stage, d->ind), 0;
     VkMemSpan source;
     if (!vk_mem_resolve(d->ind, sizeof(VkDrawIndirectCommand), &source) || !source.buffer ||
-        source.avail < sizeof(VkDrawIndirectCommand) || (source.offset & 3)) return 0;
+        source.avail < sizeof(VkDrawIndirectCommand) || (source.offset & 3))
+        return quads_fallback_log(QF_RESOLVE, -1, d->ind), 0;
     VK_MEM_USE(source);
     VkQuadIndirect converted;
-    if (!vk_quad_indirect_prepare(ex, &source, d->ind, &converted)) return 0;
+    if (!vk_quad_indirect_prepare(ex, &source, d->ind, &converted)) return quads_fallback_log(QF_PREPARE, -1, d->ind), 0;
     VK_MEM_BOUND(source);
     vk_mem_count(source.cls, VK_MUSE_IND, sizeof(VkDrawIndirectCommand));
     vk_exec_draw_new_cb(); // internal compute descriptors/push constants must not survive in binding caches
