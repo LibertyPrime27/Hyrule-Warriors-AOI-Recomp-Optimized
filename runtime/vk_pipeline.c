@@ -2970,7 +2970,26 @@ static void warm_builder(void *arg) {
 
 static void lb_start(const uint32_t pr_hist[16], const uint32_t fs_hist[4]);
 
+// Boot prewarm progress for the loading window (splash_win.c): stage 0 not started, 1 translating shaders,
+// 2 building pipelines (done/total), 3 finished or nothing to do. Read without a lock; values only grow.
+static volatile int warm_stage;
+static volatile uint32_t warm_total;
+
+void vk_pipeline_prewarm_progress(int *stage, uint32_t *done, uint32_t *total) {
+    *stage = __atomic_load_n(&warm_stage, __ATOMIC_ACQUIRE);
+    *total = __atomic_load_n(&warm_total, __ATOMIC_RELAXED);
+    *done = *stage >= 2 ? K.built + K.failed : 0;
+    if (*done > *total) *done = *total;
+}
+
+static void prewarm_body(void);
+
 void vk_pipeline_prewarm(void) {
+    prewarm_body();
+    __atomic_store_n(&warm_stage, 3, __ATOMIC_RELEASE);
+}
+
+static void prewarm_body(void) {
     const char *gpu = rt_config()->gpu;
     uint32_t pr_hist[16] = {0}, fs_hist[4] = {0};   // library state of the recorded pipelines (lb_start)
     if (!A.on || (gpu && !strcmp(gpu, "null"))) return;
@@ -3004,6 +3023,7 @@ void vk_pipeline_prewarm(void) {
     int cpus = (int)plat_cpu_usable();
     const char *pe = cfg_get("TOTK_PREWARM_XLATE");   // no fixed default: half the CPUs, at most 16, when unset
     int procs = pe && *pe ? atoi(pe) : cpus / 2 > 16 ? 16 : cpus / 2;
+    __atomic_store_n(&warm_stage, 1, __ATOMIC_RELEASE);
     gfx_shader_prewarm((const uint8_t(*)[32])ids, u, sh, cpus, procs < 1 ? 1 : procs);
     double t1 = now_ms();
 
@@ -3048,6 +3068,8 @@ void vk_pipeline_prewarm(void) {
     K.loading = 0;
     plat_mutex_unlock(&P.lock);
     free(ids), free(sh);
+    __atomic_store_n(&warm_total, queued, __ATOMIC_RELAXED);
+    __atomic_store_n(&warm_stage, 2, __ATOMIC_RELEASE);
 
     PlatThread *t[64];
     int nt = 0;

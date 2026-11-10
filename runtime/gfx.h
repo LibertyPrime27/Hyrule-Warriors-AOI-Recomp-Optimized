@@ -161,4 +161,8 @@ typedef struct { uint64_t frames, nvn_calls, nvn_distinct, unimplemented, valida
                  draws_skipped; } GfxStats;
 GfxStats gfx_stats(void);
 void rt_frame_presented(const tex_t *t, const int crop[4], uint64_t n); // boot.c: capture the displayed region
+// splash_win.c: the loading window from process start (rt_boot) to the first present, with HWAOI_SPLASH=1.
+// Idempotent; boot.c has weak no-ops for builds without it.
+void splash_start(void);
+void splash_stop(void);
                                                            // (saves --shot first through read_texels)
