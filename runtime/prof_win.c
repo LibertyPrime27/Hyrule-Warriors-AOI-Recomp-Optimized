@@ -48,7 +48,8 @@
 
 typedef struct { uint64_t rip, n; } RipCount;
 #define PROF_DEPTH 24             // frames kept per call chain, the sampled Rip first
-// cycles, depth, last: TOTK_PROFILE_SLOW only, the thread's cycle count and chain at its previous sample
+// cycles: TOTK_PROFILE_SLOW or TOTK_PROFILE_BUSY, the thread's cycle count after its previous sample;
+// depth, last: TOTK_PROFILE_SLOW only, the chain at its previous sample
 typedef struct { DWORD tid; HANDLE h; uint64_t n, in_exe, cycles; uint32_t depth; uint64_t last[PROF_DEPTH]; } ThreadSlot;
 
 static RipCount table[PROF_SLOTS];
@@ -65,6 +66,9 @@ static volatile LONG stop, written;
 static uintptr_t exe_lo, exe_hi;
 static int only_render;             // TOTK_PROFILE_RENDER=1: sample the render thread only
 static int only_main;               // TOTK_PROFILE_MAIN=1: sample the guest main thread only
+// TOTK_PROFILE_BUSY=1: sample a thread only when it ran since its previous sample (QueryThreadCycleTime). HWAoI has
+// ~180 threads, nearly all waiting: an all-thread profile of a fight was 96% ntdll wait sites and 0.2% guest code.
+static int only_busy;
 static int chains;                  // call chains are kept: TOTK_PROFILE_RENDER or TOTK_PROFILE_CHAINS
 static volatile uint64_t cur_frame; // last presented frame
 static uint64_t frame_lo, frame_hi; // TOTK_PROFILE_FRAMES=<lo>-<hi>: sample only while presents lo..hi-1 are pending
@@ -245,6 +249,10 @@ static DWORD WINAPI sampler_main(void *arg) {
         for (int i = 0; i < n_threads; i++) {
             ThreadSlot *t = &threads[i];
             if ((only_render && t->tid != render_tid) || (only_main && t->tid != main_tid)) continue;
+            if (only_busy) {
+                uint64_t ran = 0;
+                if (QueryThreadCycleTime(t->h, &ran) && ran == t->cycles) continue;   // waited since its last sample
+            }
             uint64_t cyc = 0;
             if (slow_ns && t->depth && QueryThreadCycleTime(t->h, &cyc) && cyc == t->cycles) {   // still waiting
                 Sample *s = &ring[ring_n++ & (SLOW_RING - 1)];
@@ -268,6 +276,7 @@ static DWORD WINAPI sampler_main(void *arg) {
                 memcpy(stk_buf, (void *)ctx.Rsp, n);
             }
             ResumeThread(t->h);
+            if (only_busy && !slow_ns) QueryThreadCycleTime(t->h, &t->cycles);   // the sample's own cost is not running
             if (!ok) continue;
             count_rip(ctx.Rip);
             uint64_t chain[PROF_DEPTH] = {ctx.Rip};
@@ -347,6 +356,9 @@ int prof_sampler_start(void) {
     }
     only_render = cfg_get("TOTK_PROFILE_RENDER") != NULL;
     only_main = !only_render && cfg_get("TOTK_PROFILE_MAIN") != NULL;
+    const char *busy = cfg_get("TOTK_PROFILE_BUSY");
+    only_busy = busy && !strcmp(busy, "1");
+    if (only_busy) rt_log("prof: sampling only threads that ran since their previous sample");
     const char *ch = cfg_get("TOTK_PROFILE_CHAINS");
     const char *sl = cfg_get("TOTK_PROFILE_SLOW");
     slow_ns = sl && atoi(sl) > 0 ? (uint64_t)atoi(sl) * 1000000ull : 0;
