@@ -75,11 +75,16 @@ static void readback_diagnostics_frame(uint64_t frame) {
     uint64_t batches = __atomic_exchange_n(&vk_exec_frame.indirect_batches, 0, __ATOMIC_RELAXED);
     uint64_t quads_gpu = __atomic_exchange_n(&vk_exec_frame.quads_gpu, 0, __ATOMIC_RELAXED);
     uint64_t quads_cpu = __atomic_exchange_n(&vk_exec_frame.quads_cpu, 0, __ATOMIC_RELAXED);
+    extern uint64_t vk_exec_quad_runs, vk_exec_quad_batched;   // vk_exec_draw.c: QUADS conversion batches
+    uint64_t quad_runs = __atomic_exchange_n(&vk_exec_quad_runs, 0, __ATOMIC_RELAXED);
+    uint64_t quad_batched = __atomic_exchange_n(&vk_exec_quad_batched, 0, __ATOMIC_RELAXED);
     rt_log("gpu-readback: frame=%llu window=60 calls=%llu bytes=%llu cpu_ms=%.3f max_ms=%.3f "
-           "sixteen_byte_reads=%llu automatic_parts=%llu indirect_batches=%llu quads_gpu=%llu quads_cpu=%llu", (unsigned long long)frame,
+           "sixteen_byte_reads=%llu automatic_parts=%llu indirect_batches=%llu quads_gpu=%llu quads_cpu=%llu "
+           "quad_conversion_batches=%llu quad_draws_converted=%llu", (unsigned long long)frame,
            (unsigned long long)calls, (unsigned long long)bytes, elapsed / 1e6, maximum / 1e6,
            (unsigned long long)tiny, (unsigned long long)parts, (unsigned long long)batches,
-           (unsigned long long)quads_gpu, (unsigned long long)quads_cpu);
+           (unsigned long long)quads_gpu, (unsigned long long)quads_cpu, (unsigned long long)quad_runs,
+           (unsigned long long)quad_batched);
 }
 
 uint64_t vk_exec_recording_fence(void) { return x_here ? X.fence : 0; }

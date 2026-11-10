@@ -8,7 +8,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 CC = Path("F:/llvm-mingw/bin/clang.exe")
-DEPS = Path("F:/TotKDependencies/runtime/deps")
+DEPS = Path(os.environ.get("HWAOI_TEST_DEPS") or "F:/TotKDependencies/runtime/deps")   # Vulkan/VMA headers, libvulkan-1
 
 
 def source(recorded=False):
@@ -52,6 +52,11 @@ VkResult vmaCreateBuffer(VmaAllocator allocator,const VkBufferCreateInfo *bi,con
  VK(vkAllocateMemory(context.device,&mi,NULL,&a->memory));VK(vkBindBufferMemory(context.device,*b,a->memory,0));
  if(ai->flags&VMA_ALLOCATION_CREATE_MAPPED_BIT)VK(vkMapMemory(context.device,a->memory,0,bi->size,0,&a->map));
  if(info){memset(info,0,sizeof *info);info->pMappedData=a->map;}*allocation=(VmaAllocation)a;allocated++;return VK_SUCCESS;
+}
+VkResult vmaFlushAllocation(VmaAllocator allocator,VmaAllocation allocation,VkDeviceSize offset,VkDeviceSize size){
+ (void)allocator;(void)offset;(void)size;Allocation *a=(Allocation *)allocation;
+ VkMappedMemoryRange r={.sType=VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,.memory=a->memory,.offset=0,.size=VK_WHOLE_SIZE};
+ return vkFlushMappedMemoryRanges(context.device,1,&r);
 }
 void vmaDestroyBuffer(VmaAllocator allocator,VkBuffer b,VmaAllocation allocation){
  (void)allocator;Allocation *a=(Allocation *)allocation;if(a->map)vkUnmapMemory(context.device,a->memory);

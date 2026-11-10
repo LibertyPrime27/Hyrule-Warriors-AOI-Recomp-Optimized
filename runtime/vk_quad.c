@@ -144,39 +144,67 @@ static QuadBlock *quad_block(VkExec *ex) {
     return b;
 }
 
-int vk_quad_indirect_prepare(VkExec *ex, const VkMemSpan *source, uint64_t address, VkQuadIndirect *out) {
-    if (!ex || !ex->fence || !source || !out || !source->buffer || source->avail < 16 || (source->offset & 3) ||
-        source->offset > UINT64_MAX - 16 || !quad_init()) return 0;
+// The source binding of an argument record: its storage offset rounded down to the device alignment and the word
+// offset of the record within it. 0 when the record cannot be bound.
+static int source_binding(const VkMemSpan *source, uint64_t *offset, uint64_t *lead) {
+    if (!source || !source->buffer || source->avail < 16 || (source->offset & 3) || source->offset > UINT64_MAX - 16)
+        return 0;
     VkCtx *c = vk_ctx();
     uint64_t alignment = c->props.limits.minStorageBufferOffsetAlignment;
     if (!alignment) alignment = 1;
-    uint64_t offset = source->offset / alignment * alignment, lead = source->offset - offset;
-    if ((lead & 3) || lead / 4 > UINT32_MAX || lead + 16 > c->props.limits.maxStorageBufferRange) return 0;
-    QuadBlock *b = quad_block(ex);
-    if (!b) return 0;
-    uint32_t slot = b->used++;
-    uint64_t header = slot * Q.stride;
-    memset(b->mapped + header, 0, 64); b->address[slot] = address;
-    VkDescriptorBufferInfo buffer[2] = {{source->buffer, offset, lead + 16}, {b->buffer, header, 64}};
-    VkWriteDescriptorSet write[2]; memset(write, 0, sizeof write);
-    for (uint32_t i = 0; i < 2; i++) write[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstBinding = i, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &buffer[i]};
-    vk_exec_barrier(ex); // the arguments' producers precede the conversion (and the dispatch needs the pass ended)
-    rec_push(Q.push, ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, Q.layout, 0, 2, write);
-    uint32_t word = (uint32_t)(lead / 4);
-    vkCmdBindPipeline(ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, Q.prepare);
-    vkCmdPushConstants(ex->cb, Q.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &word);
-    vkCmdDispatch(ex->cb, 1, 1, 1);
+    *offset = source->offset / alignment * alignment, *lead = source->offset - *offset;
+    return !(*lead & 3) && *lead / 4 <= UINT32_MAX && *lead + 16 <= c->props.limits.maxStorageBufferRange;
+}
+
+int vk_quad_indirect_prepare_batch(VkExec *ex, const VkMemSpan *sources, const uint64_t *addresses, uint32_t n,
+                                   VkQuadIndirect *out, uint8_t *ok) {
+    if (!ex || !ex->fence || !sources || !addresses || !out || !ok || !n || !quad_init()) return 0;
+    uint32_t done = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t offset, lead;
+        ok[i] = 0;
+        if (!source_binding(&sources[i], &offset, &lead)) continue;
+        QuadBlock *b = quad_block(ex);
+        if (!b) continue;
+        if (!done) {
+            // Once for the whole batch: the arguments' producers precede every conversion (and dispatches need the
+            // render pass ended). Each record converts into its own header slot, so the dispatches need no barriers
+            // between them.
+            vk_exec_barrier(ex);
+            vkCmdBindPipeline(ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, Q.prepare);
+            ex->recorded += 2;
+        }
+        uint32_t slot = b->used++;
+        uint64_t header = slot * Q.stride;
+        memset(b->mapped + header, 0, 64); b->address[slot] = addresses[i];
+        VkDescriptorBufferInfo buffer[2] = {{sources[i].buffer, offset, lead + 16}, {b->buffer, header, 64}};
+        VkWriteDescriptorSet write[2]; memset(write, 0, sizeof write);
+        for (uint32_t k = 0; k < 2; k++) write[k] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding = k, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &buffer[k]};
+        rec_push(Q.push, ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, Q.layout, 0, 2, write);
+        uint32_t word = (uint32_t)(lead / 4);
+        vkCmdPushConstants(ex->cb, Q.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &word);
+        vkCmdDispatch(ex->cb, 1, 1, 1);
+        b->submitted[slot] = 1;
+        ex->recorded += 3;
+        out[i] = (VkQuadIndirect){Q.indices, b->buffer, header};
+        ok[i] = 1;
+        done++;
+    }
+    if (!done) return 0;
     VkMemoryBarrier2 memory = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
         .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
         .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_HOST_BIT,
         .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_HOST_READ_BIT};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &memory};
     vkCmdPipelineBarrier2(ex->cb, &di);
-    b->submitted[slot] = 1;
-    ex->recorded += 5;
-    *out = (VkQuadIndirect){Q.indices, b->buffer, header};
-    return 1;
+    ex->recorded += 1;
+    return (int)done;
+}
+
+int vk_quad_indirect_prepare(VkExec *ex, const VkMemSpan *source, uint64_t address, VkQuadIndirect *out) {
+    uint8_t ok = 0;
+    return source && vk_quad_indirect_prepare_batch(ex, source, &address, 1, out, &ok) == 1 && ok;
 }
 
 void vk_quad_shutdown(void) {

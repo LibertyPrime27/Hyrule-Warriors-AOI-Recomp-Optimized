@@ -3281,6 +3281,93 @@ static int gpu_quads_graphics(const VkExec *ex, int *why, int *why_stage) {
     return vertex;
 }
 
+// ---- batched QUADS conversion
+// Every conversion ends the render pass behind a full barrier, which drains the GPU: measured at ~0.14 ms per draw on
+// an RTX 3080, up to ~190 draws a frame in a fight. A QUADS draw therefore also converts the QUADS indirect draws that
+// follow it in the same command list when only pure state commands separate them: nothing in between can write their
+// argument records, so converting them early reads the same bytes. The later draws then use their converted commands
+// without another pass end. QUAD_RUN bounds a batch (one quad block's slots).
+#define QUAD_RUN 64u
+#define QUAD_SCAN_OPS 4096u
+static struct { const p_draw_ind *op[QUAD_RUN]; VkQuadIndirect conv[QUAD_RUN]; uint32_t n; uint64_t fence; } QB;
+uint64_t vk_exec_quad_runs, vk_exec_quad_batched;   // conversion batches and the draws they converted (diagnostics)
+
+// The QUADS indirect draws after h that a conversion at h may cover, in order (at most cap).
+static uint32_t quads_lookahead(const p_draw_ind *first, const p_draw_ind **out, uint32_t cap) {
+    const op_hdr *h = (const op_hdr *)(const void *)first - 1, *o = nvn_op_next(h);
+    uint32_t n = 0;
+    for (uint32_t scanned = 0; n < cap && scanned < QUAD_SCAN_OPS; scanned++) {
+        if (o->size < sizeof *o || (o->size & 7) || o->op >= OP_COUNT_) break;
+        switch (o->op) {
+        case OP_JUMP: o = (const op_hdr *)(uintptr_t)((const p_jump *)nvn_op_payload(o))->target; continue;
+        case OP_DRAW_IND: {
+            const p_draw_ind *x = nvn_op_payload(o);
+            if (x->prim != NVN_DRAW_PRIMITIVE_QUADS || !x->ind || (x->ind & 3) ||
+                x->ind > UINT64_MAX - sizeof(VkDrawIndirectCommand)) return n;
+            out[n++] = x;
+            break;
+        }
+        // Pure state: no GPU memory writes, no render target or pass change.
+        case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_STENCIL: case OP_POLY_OFFSET:
+        case OP_BLEND_COLOR: case OP_DEPTH_CLAMP: case OP_RASTER_DISCARD: case OP_PRIM_RESTART: case OP_COPY_STRIDE:
+        case OP_COPY_IMAGE_STRIDE: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_BIND_PROGRAM: case OP_BIND_STATE:
+        case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_UBO: case OP_BIND_SSBO:
+        case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_PUSH_CONST: case OP_WAIT_SYNC: case OP_FENCE_SYNC:
+            break;
+        default: return n;   // copies, clears, updates, barriers, counters, targets, other draws, calls, the end
+        }
+        o = nvn_op_next(o);
+    }
+    return n;
+}
+
+// Converts d and the QUADS draws quads_lookahead finds; d's command in *out. 0: d was not converted.
+static int quads_convert(VkExec *ex, const p_draw_ind *d, VkQuadIndirect *out) {
+    const p_draw_ind *draws[QUAD_RUN];
+    draws[0] = d;
+    uint32_t n = 1 + quads_lookahead(d, draws + 1, QUAD_RUN - 1);
+    VkMemSpan sources[QUAD_RUN];
+    uint64_t addresses[QUAD_RUN];
+    const p_draw_ind *kept[QUAD_RUN];
+    uint32_t m = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        VkMemSpan s;
+        if (!vk_mem_resolve(draws[i]->ind, sizeof(VkDrawIndirectCommand), &s) || !s.buffer ||
+            s.avail < sizeof(VkDrawIndirectCommand) || (s.offset & 3)) {
+            if (!i) return quads_fallback_log(QF_RESOLVE, -1, d->ind), 0;
+            continue;   // converted on its own when the replay reaches it
+        }
+        VK_MEM_USE(s);   // the conversion reads the record now
+        sources[m] = s, addresses[m] = draws[i]->ind, kept[m++] = draws[i];
+    }
+    VkQuadIndirect conv[QUAD_RUN];
+    uint8_t ok[QUAD_RUN];
+    if (!vk_quad_indirect_prepare_batch(ex, sources, addresses, m, conv, ok) || kept[0] != d || !ok[0])
+        return quads_fallback_log(QF_PREPARE, -1, d->ind), 0;
+    QB.fence = ex->fence, QB.n = 0;
+    for (uint32_t i = 0; i < m; i++) {
+        VK_MEM_BOUND(sources[i]);
+        vk_mem_count(sources[i].cls, VK_MUSE_IND, sizeof(VkDrawIndirectCommand));
+        if (i && ok[i]) QB.op[QB.n] = kept[i], QB.conv[QB.n++] = conv[i];
+    }
+    __atomic_fetch_add(&vk_exec_quad_runs, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&vk_exec_quad_batched, m, __ATOMIC_RELAXED);
+    *out = conv[0];
+    return 1;
+}
+
+// d's command converted ahead by an earlier draw of this submission, consumed once.
+static int quads_converted(const VkExec *ex, const p_draw_ind *d, VkQuadIndirect *out) {
+    if (QB.fence != ex->fence) return QB.n = 0, 0;
+    for (uint32_t i = 0; i < QB.n; i++)
+        if (QB.op[i] == d) {
+            *out = QB.conv[i];
+            QB.op[i] = NULL;
+            return 1;
+        }
+    return 0;
+}
+
 static int gpu_quads_draw(VkExec *ex, const p_draw_ind *d) {
     static int enabled = -1;
     if (enabled < 0) {
@@ -3290,18 +3377,13 @@ static int gpu_quads_draw(VkExec *ex, const p_draw_ind *d) {
     int why = 0, stage = -1;
     if (!enabled || (enabled == 2 && !rt_ab())) return quads_fallback_log(QF_DISABLED, -1, d->ind), 0;
     if (!gpu_quads_graphics(ex, &why, &stage)) return quads_fallback_log(why, stage, d->ind), 0;
-    VkMemSpan source;
-    if (!vk_mem_resolve(d->ind, sizeof(VkDrawIndirectCommand), &source) || !source.buffer ||
-        source.avail < sizeof(VkDrawIndirectCommand) || (source.offset & 3))
-        return quads_fallback_log(QF_RESOLVE, -1, d->ind), 0;
-    VK_MEM_USE(source);
     VkQuadIndirect converted;
-    if (!vk_quad_indirect_prepare(ex, &source, d->ind, &converted)) return quads_fallback_log(QF_PREPARE, -1, d->ind), 0;
-    VK_MEM_BOUND(source);
-    vk_mem_count(source.cls, VK_MUSE_IND, sizeof(VkDrawIndirectCommand));
-    vk_exec_draw_new_cb(); // internal compute descriptors/push constants must not survive in binding caches
-    bind_gen++;
-    ex->dirty |= VK_EXEC_DIRTY_ALL;
+    if (!quads_converted(ex, d, &converted)) {
+        if (!quads_convert(ex, d, &converted)) return 0;
+        vk_exec_draw_new_cb(); // internal compute descriptors/push constants must not survive in binding caches
+        bind_gen++;
+        ex->dirty |= VK_EXEC_DIRTY_ALL;
+    }
     c0_binst = 0; // NVN2 graphics uses the draw's BaseInstance, as for native indexed indirect
     __atomic_fetch_add(&vk_exec_frame.quads_gpu, 1, __ATOMIC_RELAXED);
     if (!prepare_draw(ex, d->prim, INT32_MAX, 0)) return 1;
