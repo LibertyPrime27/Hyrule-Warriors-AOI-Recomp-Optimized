@@ -123,7 +123,7 @@ def package(args):
     subprocess.run([str(args.llvm / "bin/clang.exe"), "-O2", "-mwindows", "-municode", "-Wall", "-Wextra", "-Werror",
                     str(ROOT / "compiler/launcher.c"), "-o", str(out / "Hyrule Warriors AOI Recomp Optimized Compiler.exe")], check=True)
     (out / "START-HERE.txt").write_text(
-        "Hyrule Warriors AOI Recomp Optimized - Compiler (experimental Windows x64 preview)\n\n"
+        "Hyrule Warriors AOI Recomp Optimized - Compiler (Windows x64)\n\n"
         "1. Extract this complete ZIP to a writable folder. No Python/.NET/compiler installation is needed.\n"
         "2. Open Hyrule Warriors AOI Recomp Optimized Compiler.exe. Select your own matching NUP and an output folder on a drive with 20+ GiB free.\n"
         "3. Click Compile / update. After completion, click Open compiled game.\n"
