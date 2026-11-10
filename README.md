@@ -18,7 +18,7 @@ The game's ARM64 code is translated to C ahead of time and compiled with a C/C++
 Native **1080p / 60 FPS** is the current testing baseline. On the RTX 4060 / Core i5-14600KF test PC, ordinary outdoor gameplay has reached approximately **60 FPS**, with initial combat reported around **45 FPS**. These are observations from the opening areas, not a whole-game performance guarantee.
 
 > [!WARNING]
-> **Frame-rate modes other than 60 FPS still have gameplay-speed errors.** Current source corrects the native scheduler clock, but a normal-input movement comparison still shows a separate speed difference. Character, animation and combat timing remain under adaptation.
+> **Play at 60 FPS. Higher frame-rate modes speed up the game.** Gameplay advances a fixed step per update, so at 90 and 120 FPS the game runs 1.5× and 2× fast. For smoother output, use frame generation over a true 60 FPS instead (see [Higher frame rates](#higher-frame-rates)).
 >
 > **Higher-resolution modes are unstable.** Their 3D render sizes have been verified, but broader gameplay, UI and movie scaling are still being adapted.
 
@@ -30,7 +30,7 @@ Native **1080p / 60 FPS** is the current testing baseline. On the RTX 4060 / Cor
 | ✅ | Movement and camera | Keyboard/mouse movement and camera controls work; SDL controller support is integrated. |
 | 🔧 | Rendering | Outdoor scenes and initial combat render. Small CPU-authored RGBA8 comparison textures up to 8×8 now have a tested conversion path; the reported crash scenes await retesting. |
 | 🔧 | Combat performance | NVN2 indirect QUADS now have a GPU argument/index conversion path, avoiding their ordered CPU readback. Local GPU/recorder tests pass; crowded-scene FPS gains still need measurement. |
-| 🧪 | 30 / 60 / 90 / 120 FPS | The native unlock exceeds 60 FPS. Inherited/fixed scheduler steps now follow each node's elapsed clock and preserve parent time scales. Live clock checks pass at all four targets; movement still has a separate frame-dependent speed error. |
+| 🧪 | 30 / 60 / 90 / 120 FPS | The native unlock exceeds 60 FPS. Inherited/fixed scheduler steps now follow each node's elapsed clock and preserve parent time scales. Live clock checks pass at all four targets, but gameplay ignores that clock: movement advances a fixed step per update, so 90/120 FPS run 1.5×/2× fast. Use 60 FPS plus frame generation. |
 | 🧪 | Native resolution presets | 720p, 1080p, 1440p and 4K 3D dimensions are confirmed in GPU captures. Higher resolutions remain experimental and unstable. |
 | 🔧 | Playthrough coverage | Opening exploration and initial combat only; later missions remain unverified. |
 
@@ -70,6 +70,17 @@ python tools/hwaoi.py generate --rate-unlock --out work/generated/hwaoi196608-fu
 After building that generation, `HWAOI_RATE_UNLOCK=1` enables the candidate. It remains off by default while gameplay timing is being tested. The frame-rate target can then be selected in the host settings. Older generations without the matching step profile must be regenerated. `HWAOI_RATE_DIAG=1` optionally logs scheduler-step totals against wall time without altering the clock.
 
 Press **Esc** for host settings, **F10** to cycle the performance overlay, and **F11** for fullscreen. Resolution changes require a restart. Actual FPS depends on the scene, hardware and selected resolution.
+
+### Higher frame rates
+
+The game's logic is locked to 60 updates per second. Diagnostics on build 196608 found:
+
+- Doubling the scheduler step, or the "speed scale" in the time block it writes (`main+0x6c2c10`, offset `+0x1290`), leaves walking speed unchanged at 60 FPS.
+- The vsync event is a fixed 60 Hz real-time signal, so vsync counting does not cause it either.
+
+Each update moves the game a fixed amount, so true 90/120 FPS would need every per-update system rescaled.
+
+For smoother motion, keep the target at **60 FPS** and add an external frame-generation tool, such as Lossless Scaling's LSFG 2×. The game's fullscreen mode (F11) is borderless rather than exclusive, so these tools can capture it. Gameplay speed stays correct because the game still runs 60 updates per second.
 
 ## Testing and reports
 
