@@ -70,7 +70,7 @@ The 30 / 60 / 90 / 120 FPS settings are available, both in the compiler (**Allow
 
 ## Current status
 
-**Early development build, updated November 9, 2026.** The game boots, plays the opening movies and reaches outdoor exploration and combat. A complete playthrough has not been verified.
+**Release 1.0.0, November 9, 2026.** The game boots, plays the opening movies and reaches outdoor exploration and combat. A complete playthrough has not been verified.
 
 | | Part | Progress |
 | --- | --- | --- |
@@ -89,7 +89,7 @@ The 30 / 60 / 90 / 120 FPS settings are available, both in the compiler (**Allow
 
 ## Using it
 
-1. **Get the compiler.** No release ZIP of this fork is published yet. Build the compiler package with `tools/package_hwaoi_compiler.py`, or run the tools from source (see below).
+1. **Get the compiler.** Download the ZIP from the [latest release](https://github.com/LibertyPrime27/hwaoi-recomp/releases/latest) and extract the whole ZIP to a writable folder. Python, the C/C++ toolchain and the shader translator are bundled, so nothing else needs installing.
 2. **Open Hyrule Warriors AOI Recomp Optimized Compiler.exe.** Select your own matching game **NUP** (and optionally an update or DLC NUP), choose an output folder, then click **Compile / update**.
 3. **Click Open compiled game** when the build finishes.
 
