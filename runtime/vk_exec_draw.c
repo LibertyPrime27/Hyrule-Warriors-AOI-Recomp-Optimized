@@ -3315,6 +3315,10 @@ static uint32_t quads_lookahead(const p_draw_ind *first, const p_draw_ind **out,
         case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_UBO: case OP_BIND_SSBO:
         case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_PUSH_CONST: case OP_WAIT_SYNC: case OP_FENCE_SYNC:
             break;
+        case OP_BARRIER:   // a barrier without ORDER bits records nothing (vk_exec_barrier_needed): no write, no pass end
+            if (!vk_exec_barrier_needed(((const p_barrier *)nvn_op_payload(o))->bits)) break;
+            __atomic_fetch_add(&vk_exec_quad_stop[o->op], 1, __ATOMIC_RELAXED);
+            return n;
         default:   // copies, clears, updates, barriers, counters, targets, other draws, calls, the end
             __atomic_fetch_add(&vk_exec_quad_stop[o->op], 1, __ATOMIC_RELAXED);
             return n;

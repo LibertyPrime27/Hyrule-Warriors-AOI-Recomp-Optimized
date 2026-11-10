@@ -57,8 +57,25 @@ static uint64_t readback_calls, readback_bytes, readback_ns, readback_max_ns, re
 static uint64_t barriers_recorded, guest_barriers;
 // The guest's NVNbarrierBits masks (the 8 defined bits) and the guest barriers with no draw, dispatch or other
 // recorded GPU work since the previous guest barrier of the replay.
-static uint64_t barrier_masks[256], barriers_idle;
+static uint64_t barrier_masks[256], barriers_idle, barriers_elided;
 static uint64_t barrier_last_recorded = UINT64_MAX;
+
+// nvnCommandBufferBarrier(bits). Only the ORDER bits make the GPU wait for earlier work: ORDER_PRIMITIVES (0x1),
+// ORDER_FRAGMENTS (0x2), ORDER_FRAGMENTS_TILED (0x4), ORDER_INDIRECT_DATA (0x8). The INVALIDATE bits (texture 0x10,
+// shader 0x20, texture descriptor 0x40, ZCULL 0x80) only drop caches for later reads, and a barrier without bits does
+// nothing. Every guest barrier used to become a full ALL_COMMANDS barrier and a render-pass end: in a fight about
+// 300,000 a second, 75-80% of them texture invalidations alone and 6-8% without bits, and GPU time followed their count.
+// In Vulkan an invalidation alone adds nothing: the GPU writes it could make visible were made available and visible to
+// all later commands by the full barrier of the ORDER barrier that ordered them, and host writes by the submission.
+// So barriers without ORDER bits (and without unknown bits) are not recorded. TOTK_BARRIER_ELIDE=0 records them all.
+int vk_exec_barrier_needed(int bits) {
+    static int elide = -1;
+    if (elide < 0) {
+        const char *e = cfg_get("TOTK_BARRIER_ELIDE");
+        elide = !(e && !strcmp(e, "0"));
+    }
+    return !elide || (bits & 0xf) || (bits & ~0xff);
+}
 static int readback_diagnostics_on(void) {
     static int enabled = -1;
     int value = __atomic_load_n(&enabled, __ATOMIC_ACQUIRE);
@@ -88,8 +105,9 @@ static void readback_diagnostics_frame(uint64_t frame) {
     uint64_t barriers = __atomic_exchange_n(&barriers_recorded, 0, __ATOMIC_RELAXED);
     uint64_t guest = __atomic_exchange_n(&guest_barriers, 0, __ATOMIC_RELAXED);
     uint64_t ub_updates = __atomic_exchange_n(&vk_exec_ub_updates, 0, __ATOMIC_RELAXED);
-    uint64_t stop[OP_COUNT_];
-    uint32_t top[3] = {0, 0, 0};
+    uint64_t stop[OP_COUNT_ + 1];
+    uint32_t top[3] = {OP_COUNT_, OP_COUNT_, OP_COUNT_};   // stop[OP_COUNT_] = 0: an empty rank
+    stop[OP_COUNT_] = 0;
     for (uint32_t op = 0; op < OP_COUNT_; op++) {
         stop[op] = __atomic_exchange_n(&vk_exec_quad_stop[op], 0, __ATOMIC_RELAXED);
         for (int k = 0; k < 3; k++)
@@ -99,8 +117,9 @@ static void readback_diagnostics_frame(uint64_t frame) {
                 break;
             }
     }
-    uint64_t masks[256];
-    uint32_t mtop[4] = {0, 0, 0, 0};
+    uint64_t masks[257];
+    uint32_t mtop[4] = {256, 256, 256, 256};   // masks[256] = 0: an empty rank
+    masks[256] = 0;
     for (uint32_t m = 0; m < 256; m++) {
         masks[m] = __atomic_exchange_n(&barrier_masks[m], 0, __ATOMIC_RELAXED);
         for (int k = 0; k < 4; k++)
@@ -111,10 +130,11 @@ static void readback_diagnostics_frame(uint64_t frame) {
             }
     }
     uint64_t idle = __atomic_exchange_n(&barriers_idle, 0, __ATOMIC_RELAXED);
-    rt_log("gpu-drains: frame=%llu window=60 barriers=%llu guest_barriers=%llu guest_idle=%llu ub_updates=%llu "
+    uint64_t elided = __atomic_exchange_n(&barriers_elided, 0, __ATOMIC_RELAXED);
+    rt_log("gpu-drains: frame=%llu window=60 barriers=%llu guest_barriers=%llu guest_idle=%llu guest_elided=%llu ub_updates=%llu "
            "guest_masks=%#x:%llu,%#x:%llu,%#x:%llu,%#x:%llu quad_batch_stops=%s:%llu,%s:%llu,%s:%llu",
            (unsigned long long)frame, (unsigned long long)barriers, (unsigned long long)guest,
-           (unsigned long long)idle, (unsigned long long)ub_updates, mtop[0], (unsigned long long)masks[mtop[0]],
+           (unsigned long long)idle, (unsigned long long)elided, (unsigned long long)ub_updates, mtop[0], (unsigned long long)masks[mtop[0]],
            mtop[1], (unsigned long long)masks[mtop[1]], mtop[2], (unsigned long long)masks[mtop[2]], mtop[3],
            (unsigned long long)masks[mtop[3]], nvn_op_name(top[0]), (unsigned long long)stop[top[0]],
            nvn_op_name(top[1]), (unsigned long long)stop[top[1]], nvn_op_name(top[2]), (unsigned long long)stop[top[2]]);
@@ -1035,7 +1055,8 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
                 __atomic_fetch_add(&barrier_masks[((const p_barrier *)a)->bits & 0xff], 1, __ATOMIC_RELAXED);
                 if (ex->recorded == barrier_last_recorded) __atomic_fetch_add(&barriers_idle, 1, __ATOMIC_RELAXED);
             }
-            vk_exec_barrier(ex);
+            if (vk_exec_barrier_needed(((const p_barrier *)a)->bits)) vk_exec_barrier(ex);
+            else if (readback_diagnostics_on()) __atomic_fetch_add(&barriers_elided, 1, __ATOMIC_RELAXED);
             barrier_last_recorded = ex->recorded;
             break;
         case OP_WAIT_SYNC: break;   // submit preparation waited before any replay/snapshot; source may be gone

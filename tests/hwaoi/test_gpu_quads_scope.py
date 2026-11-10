@@ -61,6 +61,7 @@ int vk_quad_indirect_prepare_batch(VkExec *ex,const VkMemSpan *sources,const uin
  ex->recorded+=8;return (int)n;
 }
 void vk_exec_draw_new_cb(void){reset++;}
+int vk_exec_barrier_needed(int bits){return (bits&0xf)||(bits&~0xff);}   // vk_exec.c's rule: ORDER bits record a barrier
 static int prepare_draw(VkExec *ex,int primitive,int32_t count,int restart){(void)ex;
  CHECK(primitive==NVN_DRAW_PRIMITIVE_QUADS && count==INT32_MAX && restart==0);prepares++;return draw_ok;}
 static VkDeviceSize expected_offset=512;
@@ -71,11 +72,13 @@ void rc_vkCmdDrawIndexedIndirect(VkCommandBuffer cb,VkBuffer b,VkDeviceSize offs
 static void note_work(const VkExec *ex,int kind,uint64_t work){(void)ex;CHECK(kind==1 && !work);notes++;}
 // A command list: QUADS draws at argument records 0x10000 + 16k, with the given op between consecutive draws.
 static uint64_t list[64];
+static int barrier_bits;
 static const p_draw_ind *record(unsigned draws_wanted,uint32_t between){
  uint8_t *at=(uint8_t *)list;const p_draw_ind *first=NULL;
  for(unsigned k=0;k<draws_wanted;k++){
-  if(k && between){op_hdr *s=(op_hdr *)at;s->op=between;s->size=sizeof(op_hdr)+(between==OP_COPY_B2B?sizeof(p_copy_b2b):sizeof(p_scissor));
-   memset(s+1,0,s->size-sizeof *s);at+=s->size;}
+  if(k && between){op_hdr *s=(op_hdr *)at;s->op=between;
+   s->size=sizeof(op_hdr)+(between==OP_COPY_B2B?sizeof(p_copy_b2b):between==OP_BARRIER?sizeof(p_barrier):sizeof(p_scissor));
+   memset(s+1,0,s->size-sizeof *s);if(between==OP_BARRIER)((p_barrier *)(s+1))->bits=barrier_bits;at+=s->size;}
   op_hdr *h=(op_hdr *)at;h->op=OP_DRAW_IND;h->size=sizeof(op_hdr)+sizeof(p_draw_ind);
   p_draw_ind *d=(p_draw_ind *)(h+1);*d=(p_draw_ind){NVN_DRAW_PRIMITIVE_QUADS,0,0x10000+16*(uint64_t)k};if(!k)first=d;
   at+=h->size;
@@ -96,8 +99,13 @@ int main(int argc,char **argv){
  present|=1u<<NVN_STAGE_GS;CHECK(!gpu_quads_graphics(&ex,&why,&stage) && why==QF_STAGE && stage==NVN_STAGE_GS);present&=~(1u<<NVN_STAGE_GS);
  present|=1u<<NVN_STAGE_TCS;CHECK(!gpu_quads_graphics(&ex,&why,&stage) && why==QF_STAGE);present&=~(1u<<NVN_STAGE_TCS);
  present=1u<<NVN_STAGE_FS;CHECK(!gpu_quads_graphics(&ex,&why,&stage) && why==QF_NO_VERTEX);present=(1u<<NVN_STAGE_VS)|(1u<<NVN_STAGE_FS);
- if(!strcmp(argv[1],"batch")||!strcmp(argv[1],"nobatch")){
-  int batch=!strcmp(argv[1],"batch");const p_draw_ind *a=record(3,batch?OP_SCISSOR:OP_COPY_B2B),*b=next_draw(a),*c=next_draw(b);
+ if(!strcmp(argv[1],"batch")||!strcmp(argv[1],"nobatch")||!strcmp(argv[1],"invalidate")||!strcmp(argv[1],"order")){
+  // Scissor and texture-invalidation-only barriers (0x10, recorded as nothing) separate batched draws; a copy or an
+  // ORDER_FRAGMENTS barrier (0x2) ends the batch.
+  int batch=!strcmp(argv[1],"batch")||!strcmp(argv[1],"invalidate");
+  uint32_t between=!strcmp(argv[1],"batch")?OP_SCISSOR:!strcmp(argv[1],"nobatch")?OP_COPY_B2B:OP_BARRIER;
+  barrier_bits=!strcmp(argv[1],"invalidate")?0x10:0x2;
+  const p_draw_ind *a=record(3,between),*b=next_draw(a),*c=next_draw(b);
   CHECK(gpu_quads_draw(&ex,a));
   CHECK(batches==1 && batched==(batch?3u:1u) && reset==1 && counts==(batch?3u:1u));
   expected_offset=batch?512+64:512;CHECK(gpu_quads_draw(&ex,b));
@@ -140,7 +148,8 @@ class GpuQuadScopeTests(unittest.TestCase):
                                          "-I", str(ROOT / "runtime"), "-I", str(DEPS), "-I", str(DEPS / "vma"),
                                          str(p), "-o", str(exe)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                for case in ("good", "off", "legacy", "unbacked", "allocation", "skip", "ab-off", "ab-on", "batch", "nobatch"):
+                for case in ("good", "off", "legacy", "unbacked", "allocation", "skip", "ab-off", "ab-on", "batch", "nobatch",
+                             "invalidate", "order"):
                     result = subprocess.run([str(exe), case], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
                     self.assertEqual(result.returncode, 0, case + ": " + result.stdout + result.stderr)
 
