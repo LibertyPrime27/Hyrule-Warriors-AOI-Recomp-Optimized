@@ -10,6 +10,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     while (n && folder[n - 1] != L'\\') n--;
     if (!n) return 1;
     folder[n - 1] = 0;
+#ifdef HWAOI_BUNDLE_DIR
+    // A stand-alone launcher kept apart from the compiler files: built with the folder that holds them.
+    if (swprintf(folder, 32768, L"%ls", HWAOI_BUNDLE_DIR) < 0) return 1;
+#endif
     if (swprintf(python, 32768, L"%ls\\python\\pythonw.exe", folder) < 0 ||
         swprintf(command, 32768, L"\"%ls\" -E -s \"%ls\\source\\compiler\\gui.py\" %ls", python, folder, arguments) < 0)
         return 1;
