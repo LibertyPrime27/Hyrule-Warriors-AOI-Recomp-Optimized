@@ -45,7 +45,27 @@ int romfs_xbox_prompts_active(void);                       // and was loaded (pa
 const char *romfs_overlay(size_t k, const char **file, uint64_t *size, int *is_added);   // RomFS path of overlay k
 void fs_trace(const char *what, const char *path);         // TOTK_TRACE=fs: one line per open
 
+// ---- aoc.c: installed add-on content (DLC) and its read-only nn::fs::MountAddOnContent mounts
+#define AOC_HANDLE_BASE 0x400000000ull       // add-on file handles
+#define AOC_DIR_HANDLE_BASE 0x500000000ull   // add-on directory handles
+int aoc_count(void);                                       // installed add-ons
+int aoc_list(int32_t *out, int offset, int count);         // their AddOnContentIndex values from offset; how many written
+uint32_t aoc_mount(const char *name, int index);           // MountAddOnContent
+int aoc_unmount(const char *name);                         // 1 when name was an add-on mount (now unmounted)
+int aoc_owns(const char *path);                            // path is on an add-on mount ("<mount>:...")
+int aoc_handle(uint64_t h);                                // h is an add-on file handle
+uint32_t aoc_open(uint64_t *out, const char *path, int mode);
+uint32_t aoc_read(uint64_t *out, uint64_t h, int64_t offset, void *buffer, uint64_t size);
+uint32_t aoc_size(int64_t *out, uint64_t h);
+void aoc_close(uint64_t h);
+uint32_t aoc_entry_type(int *out, const char *path);
+int aoc_dir_handle(uint64_t h);                            // h is an add-on directory handle
+uint32_t aoc_open_directory(uint64_t *out, const char *path, int mode);
+uint32_t aoc_read_directory(int64_t *count, void *entries, uint64_t h, int64_t max);   // nn::fs::DirectoryEntry[]
+void aoc_close_directory(uint64_t h);
+
 // ---- fs_host.c
+int fs_host_mounted(const char *name);                     // a save/temp/cache mount has this name
 void fs_host_set_profile(const char *dir);                 // profile directory; before the first storage mount only
                                                            // (default rt_config()->profile)
 int fs_save_busy(void);                                    // a save is being written: a save file open for writing,

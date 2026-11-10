@@ -383,7 +383,11 @@ static void probe_applet(void) {
     CALL("err.ShowError", 0x2a8);
     CALL("nndiagStartup", 0);
     CALL("aoc.Initialize", 0);
-    CHECK(CALL("aoc.ListAddOnContent", U(out), 0, 8) == 0, "aoc: no add-on content");
+    {   // aoc.c: the listed add-ons are the installed ones (none without an aoc folder)
+        int installed = aoc_count(), want = installed < 8 ? installed : 8;
+        CHECK((int)CALL("aoc.ListAddOnContent", U(out), 0, 8) == want, "aoc: ListAddOnContent disagrees with Count");
+        CHECK(CALL("aoc.ListAddOnContent", U(out), installed, 8) == 0, "aoc: ListAddOnContent past the end");
+    }
     CALL("err.InitializeContextWriterApi", 0);
     CALL("pctl.Initialize", 0);
     CALL("diag.InitializeApplicationAbortObserver", 0);

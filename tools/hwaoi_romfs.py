@@ -44,10 +44,10 @@ def verified_application(archive, expected):
     profiled executable set AND resource inventory before extraction/caching.
     Keep the general NUP reader's explicit-selection analysis policy unchanged.
 
-    DLC/addon packages (kinds 2 and 3) merged into the same NUP are never
-    selected: only the base/update application packages are verified, extracted
-    and cached. The runtime still reports an empty installed add-on set, so the
-    DLC content itself stays unavailable, but a merged dump is accepted.
+    DLC/addon packages (kinds 2 and 3) merged into the same NUP are never part
+    of the game RomFS: only the base/update application packages are verified,
+    extracted and cached here. tools/hwaoi_aoc.py installs each add-on as its own
+    folder, which runtime/aoc.c serves through nn::fs::MountAddOnContent.
     """
     title = int(expected["title_id"], 16)
     if any(p.kind == 0 for p in archive.packages):

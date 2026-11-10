@@ -16,6 +16,7 @@ SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE / "tools"))
 from hwrecomp.nup import Nup, extract_exefs
 from hwaoi_romfs import verified_application
+import hwaoi_aoc
 import hwaoi
 if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
@@ -45,7 +46,7 @@ def bundle_check(bundle, *, defer_materialized=False):
         path = (bundle / relative).resolve()
         require(path.is_relative_to(bundle) and path.is_file(), f"Missing bundle file: {relative}")
         critical_source = relative.startswith(("source/compiler/", "source/tools/hwrecomp/", "source/config/games/")) or relative in (
-            "source/tools/hwaoi.py", "source/tools/hwaoi_romfs.py")
+            "source/tools/hwaoi.py", "source/tools/hwaoi_romfs.py", "source/tools/hwaoi_aoc.py")
         deferred = defer_materialized and not critical_source and (relative.startswith(("source/", "llvm/", "deps/", "translator/")) or
                                            relative in ("bin/ninja.exe", "bin/zlib1.dll"))
         if not deferred:
@@ -72,8 +73,8 @@ def inspect_nup(path):
         packages, _, _ = verified_application(archive, nup_profile())
         addons = sum(p.kind in (2, 3) for p in archive.packages)
         if addons:
-            print(f"  Skipping {addons} DLC/addon package(s); compiling the verified base game + update only "
-                  "(DLC content is not loaded yet).", flush=True)
+            print(f"  Found {addons} DLC/addon package(s); they are installed for the game after the base resources.",
+                  flush=True)
         if packages[0].kind == 1:
             print("  No base record: using the standalone update with the complete verified game inventory.", flush=True)
         return {"header": archive.header_sha256, "toc": archive.toc_sha256, "size": archive.file_size}
@@ -84,6 +85,12 @@ def extract_game_exefs(nup, output):
         # Keep extraction on exactly the same selection as preflight and RomFS.
         packages, _, _ = verified_application(archive, nup_profile())
         return extract_exefs(archive, output, packages[0].index if len(packages) == 1 else None)
+
+
+def install_game_dlc(nup, output):
+    """Installs the NUP's HWAoI add-ons as work/game/aoc/<index> for runtime/aoc.c; unchanged ones are reused."""
+    return hwaoi_aoc.install_from_nup(nup, Path(output) / "work/game/aoc", int(nup_profile()["title_id"], 16),
+                                      log=lambda line: print(line, flush=True))
 
 
 def fresh_output(output, bundle, nup, allow_lock=False):
@@ -230,6 +237,11 @@ def build_stages(bundle, nup, output, jobs, resolution, unlock, state, manifest,
             print("  Reusing verified resource cache.", flush=True)
         state["resource_cache"] = resource
         done("resources", began)
+        print("[3/6] Installing DLC (add-on content)...", flush=True)
+        began = time.perf_counter()
+        installed = install_game_dlc(nup, output)
+        state["dlc"] = sorted(installed)
+        done("dlc", began)
         print("[4/6] Translating ARM64 game code to C...", flush=True)
         began = time.perf_counter()
         generated = output / "work/generated/hwaoi196608-full"
