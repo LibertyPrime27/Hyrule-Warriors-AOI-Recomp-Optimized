@@ -23,7 +23,7 @@ def source(recorded=False):
 #undef vkCmdUpdateBuffer
 '''
     if not recorded:
-        module = module.replace('#include "quad_expand_spv.h"', '#include "quad_expand_spv.h"\n' + direct)
+        module = module.replace('#include "quad_prepare_spv.h"', '#include "quad_prepare_spv.h"\n' + direct)
     support = r'''
 #include <stdio.h>
 #include <stdarg.h>
@@ -176,11 +176,12 @@ int main(int argc,char **argv){
   for(unsigned i=0;i<2;i++){
    uint32_t *h=(uint32_t *)(blocks[i]->mapped+slots[i]*Q.stride),count=args[i][0]&~3u;
    int active=count && args[i][1];CHECK(h[0]==(active?(count/4)*6:0) && h[1]==(active?args[i][1]:0));
-   CHECK(h[2]==0 && h[3]==0 && h[4]==(active?args[i][3]:0) && !h[8] && h[13]==0x51554144u);
+   CHECK(h[2]==0 && h[3]==(active?args[i][2]:0) && h[4]==(active?args[i][3]:0) && !h[8] && h[13]==0x51554144u);
    CHECK(!memcmp(h+9,args[i],16));checks+=10;
    if(active){
     const uint32_t pattern[6]={0,1,2,0,2,3};uint32_t *actual=(uint32_t *)((uint8_t *)read_map+i*QUAD_INDEX_BYTES);
-    for(uint32_t j=0;j<(count/4)*6;j++){CHECK(actual[j]==args[i][2]+(j/6)*4+pattern[j%6]);checks++;}
+    // Fixed indices plus vertexOffset (h[3]) give the vertex the direct path's baked indices gave.
+    for(uint32_t j=0;j<(count/4)*6;j++){CHECK(actual[j]==(j/6)*4+pattern[j%6] && actual[j]+h[3]==args[i][2]+(j/6)*4+pattern[j%6]);checks++;}
    }
   }
   for(unsigned i=0;i<ncallbacks;i++)callbacks[i].fn(callbacks[i].arg);ncallbacks=0;

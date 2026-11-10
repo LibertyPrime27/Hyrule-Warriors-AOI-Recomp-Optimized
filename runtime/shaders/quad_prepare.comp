@@ -19,10 +19,9 @@ void main() {
     dst.words[0]=drawEnabled?(n/4u)*6u:0u;
     dst.words[1]=drawEnabled?a.y:0u;
     dst.words[2]=0u; // firstIndex
-    dst.words[3]=0u; // vertexOffset: expanded indices retain exact firstVertex semantics
+    dst.words[3]=drawEnabled?a.z:0u; // vertexOffset = firstVertex over the fixed 4q+{0,1,2,0,2,3} indices
     dst.words[4]=drawEnabled?a.w:0u;
-    dst.words[5]=drawEnabled?((n/4u+63u)/64u):0u;
-    dst.words[6]=1u; dst.words[7]=1u;
+    dst.words[5]=0u; dst.words[6]=0u; dst.words[7]=0u; // formerly the index expansion's dispatch size
     dst.words[8]=error;
     dst.words[9]=a.x; dst.words[10]=a.y; dst.words[11]=a.z; dst.words[12]=a.w;
     dst.words[13]=0x51554144u;

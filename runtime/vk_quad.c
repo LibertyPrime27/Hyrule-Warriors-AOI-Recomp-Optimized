@@ -1,6 +1,11 @@
 // Original GPU argument/index adapter. No game shader, address or patch is used.
 // GPU-written arguments stay on the GPU; invalid bounded forms draw nothing and
 // report a fatal error from their completion callback, without a CPU fence stall.
+// Indices are a fixed pattern 4q + {0,1,2,0,2,3} written once at init; each draw's converted command carries its
+// firstVertex as vertexOffset, so VertexIndex is firstVertex + 4q + {0,1,2,0,2,3} exactly as the direct QUADS path
+// gives. (BaseVertex differs from that path's 0, but no translated shader reads it: Ryujinx maps VertexId to
+// VertexIndex and the runtime's c0 carries no base vertex.) A draw costs one tiny dispatch and no index writes, where a
+// per-draw expansion into one shared buffer cost a second dispatch, a third barrier and a wait on the previous draw.
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,7 +13,6 @@
 #include "vk_quad.h"
 #include "platform/platform.h"
 #include "quad_prepare_spv.h"
-#include "quad_expand_spv.h"
 
 #define QUAD_SLOTS 64u
 #define QUAD_SPARES 32u
@@ -29,7 +33,7 @@ static struct {
     VkDevice device;
     VkDescriptorSetLayout set;
     VkPipelineLayout layout;
-    VkPipeline prepare, expand;
+    VkPipeline prepare;
     VkBuffer indices;
     VmaAllocation allocation;
     PFN_vkCmdPushDescriptorSetKHR push;
@@ -83,23 +87,31 @@ static int quad_init(void) {
     if (!Q.push) return 0;
     Q.stride = c->props.limits.minStorageBufferOffsetAlignment;
     if (Q.stride < 256) Q.stride = 256;
-    VkDescriptorSetLayoutBinding binding[3];
+    VkDescriptorSetLayoutBinding binding[2];
     memset(binding, 0, sizeof binding);
-    for (uint32_t i = 0; i < 3; i++) binding[i] = (VkDescriptorSetLayoutBinding){.binding = i,
+    for (uint32_t i = 0; i < 2; i++) binding[i] = (VkDescriptorSetLayoutBinding){.binding = i,
         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
     VkDescriptorSetLayoutCreateInfo si = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, .bindingCount = 3, .pBindings = binding};
+        .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, .bindingCount = 2, .pBindings = binding};
     if (vkCreateDescriptorSetLayout(c->device, &si, NULL, &Q.set) != VK_SUCCESS) return 0;
     VkPushConstantRange range = {.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = 4};
     VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1, .pSetLayouts = &Q.set, .pushConstantRangeCount = 1, .pPushConstantRanges = &range};
     if (vkCreatePipelineLayout(c->device, &li, NULL, &Q.layout) != VK_SUCCESS) return 0;
-    if (!quad_pipeline(quad_prepare_spv, sizeof quad_prepare_spv, &Q.prepare) ||
-        !quad_pipeline(quad_expand_spv, sizeof quad_expand_spv, &Q.expand)) return 0;
+    if (!quad_pipeline(quad_prepare_spv, sizeof quad_prepare_spv, &Q.prepare)) return 0;
+    // The fixed index pattern, written once: never a write hazard for any draw.
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = QUAD_INDEX_BYTES,
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
-    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
-    if (vmaCreateBuffer(c->vma, &bi, &ai, &Q.indices, &Q.allocation, NULL) != VK_SUCCESS) return 0;
+        .usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+        .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+    VmaAllocationInfo info;
+    if (vmaCreateBuffer(c->vma, &bi, &ai, &Q.indices, &Q.allocation, &info) != VK_SUCCESS) return 0;
+    if (!info.pMappedData) return 0;
+    uint32_t *ix = info.pMappedData;
+    static const uint32_t pattern[6] = {0, 1, 2, 0, 2, 3};
+    for (uint64_t k = 0; k < QUAD_INDEX_BYTES / 4; k++) ix[k] = (uint32_t)(k / 6 * 4) + pattern[k % 6];
+    if (vmaFlushAllocation(c->vma, Q.allocation, 0, VK_WHOLE_SIZE) != VK_SUCCESS) return 0;
     Q.ready = 1;
     rt_log("vk: GPU QUADS indirect conversion ready; argument readback is unnecessary for NVN2 graphics");
     return 1;
@@ -145,29 +157,24 @@ int vk_quad_indirect_prepare(VkExec *ex, const VkMemSpan *source, uint64_t addre
     uint32_t slot = b->used++;
     uint64_t header = slot * Q.stride;
     memset(b->mapped + header, 0, 64); b->address[slot] = address;
-    VkDescriptorBufferInfo buffer[3] = {{source->buffer, offset, lead + 16}, {b->buffer, header, 64}, {Q.indices, 0, QUAD_INDEX_BYTES}};
-    VkWriteDescriptorSet write[3]; memset(write, 0, sizeof write);
-    for (uint32_t i = 0; i < 3; i++) write[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+    VkDescriptorBufferInfo buffer[2] = {{source->buffer, offset, lead + 16}, {b->buffer, header, 64}};
+    VkWriteDescriptorSet write[2]; memset(write, 0, sizeof write);
+    for (uint32_t i = 0; i < 2; i++) write[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .dstBinding = i, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &buffer[i]};
-    vk_exec_barrier(ex); // producers + the previous draw's index reads precede conversion/reuse
-    rec_push(Q.push, ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, Q.layout, 0, 3, write);
+    vk_exec_barrier(ex); // the arguments' producers precede the conversion (and the dispatch needs the pass ended)
+    rec_push(Q.push, ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, Q.layout, 0, 2, write);
     uint32_t word = (uint32_t)(lead / 4);
     vkCmdBindPipeline(ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, Q.prepare);
     vkCmdPushConstants(ex->cb, Q.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &word);
     vkCmdDispatch(ex->cb, 1, 1, 1);
     VkMemoryBarrier2 memory = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
         .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-        .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT};
+        .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_HOST_BIT,
+        .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_HOST_READ_BIT};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &memory};
     vkCmdPipelineBarrier2(ex->cb, &di);
-    vkCmdBindPipeline(ex->cb, VK_PIPELINE_BIND_POINT_COMPUTE, Q.expand);
-    vkCmdDispatchIndirect(ex->cb, b->buffer, header + 20);
-    memory.dstStageMask = VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_HOST_BIT;
-    memory.dstAccessMask = VK_ACCESS_2_INDEX_READ_BIT | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_HOST_READ_BIT;
-    vkCmdPipelineBarrier2(ex->cb, &di);
     b->submitted[slot] = 1;
-    ex->recorded += 8;
+    ex->recorded += 5;
     *out = (VkQuadIndirect){Q.indices, b->buffer, header};
     return 1;
 }
@@ -179,7 +186,6 @@ void vk_quad_shutdown(void) {
     spare_count = 0; current = NULL; current_fence = 0;
     if (Q.indices) vmaDestroyBuffer(c->vma, Q.indices, Q.allocation);
     if (Q.prepare) vkDestroyPipeline(c->device, Q.prepare, NULL);
-    if (Q.expand) vkDestroyPipeline(c->device, Q.expand, NULL);
     if (Q.layout) vkDestroyPipelineLayout(c->device, Q.layout, NULL);
     if (Q.set) vkDestroyDescriptorSetLayout(c->device, Q.set, NULL);
     memset(&Q, 0, sizeof Q);

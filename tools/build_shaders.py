@@ -3,9 +3,10 @@
 Each runtime/shaders/<name>.comp becomes runtime/<name>_spv.h, which declares `static const uint32_t <name>_spv[]`
 and records the SHA-256 of the source it came from. The headers are committed, so building totk.exe needs no shader
 compiler; tools/build_game.py refuses to build when a header no longer matches its source. Run this after editing a
-shader. Needs glslc and spirv-val from MSYS2 UCRT64 (package mingw-w64-ucrt-x86_64-shaderc, spirv-tools).
+shader. Needs glslc and spirv-val from MSYS2 UCRT64 (package mingw-w64-ucrt-x86_64-shaderc, spirv-tools); HWAOI_SHADER_BIN
+names another folder holding them (for example the unpacked MSYS2 packages in F:/shaderc/ucrt64/bin).
 
-    python tools/build_shaders.py [--check]
+    python tools/build_shaders.py [--check] [--only NAME ...]
 """
 
 import argparse
@@ -17,7 +18,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-BIN = Path(r'C:\msys64\ucrt64\bin')   # Windows; elsewhere glslc and spirv-val come from PATH
+BIN = Path(os.environ.get('HWAOI_SHADER_BIN') or r'C:\msys64\ucrt64\bin')   # Windows; elsewhere from PATH
 WIN = os.name == 'nt'
 TARGET = 'vulkan1.1'
 
@@ -77,13 +78,20 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--check', action='store_true', help='only report headers that do not match their source')
     ap.add_argument('--runtime', type=Path, default=ROOT / 'runtime')
+    ap.add_argument('--only', nargs='+', metavar='NAME', help='compile only these shaders (source stem, e.g. quad_prepare)')
     args = ap.parse_args()
     if args.check:
         bad = stale(args.runtime)
         for s in bad:
             print(f'{header_path(s)}: stale, run tools/build_shaders.py')
         return 1 if bad else 0
-    for src in shader_sources(args.runtime):
+    sources = shader_sources(args.runtime)
+    if args.only:
+        missing = set(args.only) - {s.stem for s in sources}
+        if missing:
+            sys.exit(f'build_shaders: no shader named {", ".join(sorted(missing))}')
+        sources = [s for s in sources if s.stem in args.only]
+    for src in sources:
         compile_one(src)
     return 0
 
