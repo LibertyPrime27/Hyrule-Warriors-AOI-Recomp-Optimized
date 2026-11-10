@@ -16,6 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from compiler.backend import RESOLUTIONS, STATE
 
 
+OUTPUT_NAME = "Hyrule Warriors AOI Recomp Optimized"   # a new build's folder inside the chosen parent
+
+
 class Window:
     def __init__(self, root, bundle):
         self.root, self.bundle = root, bundle
@@ -114,9 +117,9 @@ class Window:
             self.dlc_nup.set(value)
 
     def pick_output(self):
-        parent = filedialog.askdirectory(title="Select an existing HWAoI output or a parent folder for a new build")
+        parent = filedialog.askdirectory(title="Select an existing game output folder, or a parent folder for a new build")
         if parent:
-            selected = Path(parent) if (Path(parent) / STATE).is_file() else Path(parent) / "HWAoI-Game"
+            selected = Path(parent) if (Path(parent) / STATE).is_file() else Path(parent) / OUTPUT_NAME
             self.output.set(str(selected))
             if (selected / STATE).is_file():
                 try:

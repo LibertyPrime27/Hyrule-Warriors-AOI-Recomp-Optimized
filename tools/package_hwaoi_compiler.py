@@ -128,7 +128,7 @@ def package(args):
         "2. Open Hyrule Warriors AOI Recomp Optimized Compiler.exe. Select your own matching NUP and an output folder on a drive with 20+ GiB free.\n"
         "3. Click Compile / update. After completion, click Open compiled game.\n"
         "   To reopen a build later, set Output folder to its exact path and click Open compiled game.\n\n"
-        "Updates/resume: choose the existing HWAoI-Game output folder. Verified game data/generated C and native objects\n"
+        "Updates/resume: choose the existing output folder (new builds create \"Hyrule Warriors AOI Recomp Optimized\"). Verified game data/generated C and native objects\n"
         "are reused. Changed managed source files are backed up under work/backups; saves and settings are preserved.\n"
         "Build jobs 0 selects concurrency from current RAM/commit headroom. Large C units run one at a time.\n\n"
         "Only title 04003F40232DE000 / NCM 196608 with the exact module hashes in source/config/games is supported.\n"

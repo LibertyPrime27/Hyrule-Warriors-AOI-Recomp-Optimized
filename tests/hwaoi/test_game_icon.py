@@ -14,6 +14,8 @@ import hwaoi_icon  # noqa: E402
 from test_formats import make_nup, refresh_toc_hash  # noqa: E402
 
 PNG = b"\x89PNG\r\n\x1a\n"
+CLANG = Path(os.environ.get("HWAOI_TEST_CLANG", "F:/llvm-mingw/bin/clang.exe"))
+NINJA = Path(os.environ.get("HWAOI_TEST_NINJA", "F:/HWAoI-Compiler/dev/bin/ninja.exe"))
 
 
 def with_metadata(raw, tlvs, package=0):
@@ -128,11 +130,45 @@ class BuildEdgeTests(unittest.TestCase):
                 text, objs, exe = build_game.ninja_file(gen, out, {"main": [a]}, 2)
             self.assertEqual(exe.name, "Hyrule Warriors AOI Recomp Optimized.exe")
             self.assertIn("build out/obj/game_icon.o: rc out/game_icon.rc | icon$ dir/game.ico", text)
-            self.assertIn('"@$out.rsp"', text)
-            self.assertIn('-o "$out"', text)
+            self.assertIn("@$out.rsp", text)
+            self.assertNotIn('"$out', text)   # Ninja already quotes $out; extra quotes split the name (1.0.0 bug)
             self.assertIn("build out/Hyrule$ Warriors$ AOI$ Recomp$ Optimized.exe: link", text)
             self.assertIn(out / "obj" / "game_icon.o", objs["runtime"])
             self.assertEqual((out / "game_icon.rc").read_text(encoding="utf-8"), f'1 ICON "{icon.resolve().as_posix()}"\n')
+
+    @unittest.skipUnless(sys.platform == "win32" and CLANG.is_file() and NINJA.is_file(), "Windows Clang and Ninja")
+    def test_real_link_rule_links_an_executable_whose_name_has_spaces(self):
+        """Run build_game's own link rule through Ninja and Clang, as the compiler does."""
+        import build_game
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory(prefix="hwaoi link ") as tmp:
+            root = Path(tmp)
+            gen = root / "gen"
+            gen.mkdir()
+            src = gen / "main_0000.c"
+            src.write_text("int main(void){return 7;}\n")
+            out = root / "out dir"
+            deps = root / "deps"
+            (deps / "include").mkdir(parents=True)
+            with patch.multiple(build_game, ROOT=root, MAIN_ROOT=root, WIN=True, DEPS=deps, ICON=None,
+                                CLANG=CLANG, VMA_LOCAL=root / "no-fetch"), \
+                    patch.object(build_game, "runtime_sources", side_effect=lambda *args: []), \
+                    patch.object(build_game, "vma_include", side_effect=lambda: deps / "include"):
+                text, _, exe = build_game.ninja_file(gen, out, {"main": [src]}, 1)
+            link = [line for line in text.splitlines() if line.startswith("rule link")]
+            self.assertEqual(link, ["rule link"])
+            start = text.splitlines().index("rule link")
+            rule_lines = text.splitlines()[start:start + 5]
+            obj = out / "obj" / "main" / "main_0000.o"
+            obj.parent.mkdir(parents=True)
+            subprocess.run([str(CLANG), "-c", str(src), "-o", str(obj)], check=True)
+            ninja_text = "\n".join([f"cc = {build_game.cmd_arg(CLANG.as_posix())}", "ldflags =", "libs =", *rule_lines, "",
+                                    f"build {build_game.ninja_path(exe)}: link {build_game.ninja_path(obj)}", ""])
+            (root / "build.ninja").write_text(ninja_text)
+            result = subprocess.run([str(NINJA)], cwd=root, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(exe.name, "Hyrule Warriors AOI Recomp Optimized.exe")
+            self.assertEqual(subprocess.run([str(exe)]).returncode, 7)
 
 
 if __name__ == "__main__":

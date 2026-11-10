@@ -366,7 +366,7 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
         '  description = RC $in',
         '',
         'rule link',
-        '  command = $cc $ldflags "@$out.rsp" $libs -o "$out"',   # the game name has spaces
+        '  command = $cc $ldflags @$out.rsp $libs -o $out',   # Ninja quotes $out itself when the name has spaces
         '  rspfile = $out.rsp',
         '  rspfile_content = $in_newline',
         '  description = LINK $out',
@@ -429,7 +429,7 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
         # references before the linker pulls the members with the strong definitions, which would stay out of totk.exe.
         rule = 'link_lib'
         lines += ['', 'rule link_lib',
-                  f'  command = $cc $ldflags "@$out.rsp" -Wl,--whole-archive {cmd_path(runtime_lib)} -Wl,--no-whole-archive $libs -o "$out"',
+                  f'  command = $cc $ldflags @$out.rsp -Wl,--whole-archive {cmd_path(runtime_lib)} -Wl,--no-whole-archive $libs -o $out',
                   '  rspfile = $out.rsp', '  rspfile_content = $in_newline', '  description = LINK $out']
     lines += ['', f'build {ninja_path(exe)}: {rule} ' + ' '.join(ninja_path(o) for o in every) +
               (f' | {ninja_path(runtime_lib)}' if runtime_lib else ''),

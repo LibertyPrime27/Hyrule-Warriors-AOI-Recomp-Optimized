@@ -1,0 +1,102 @@
+name: Release compiler
+
+# Builds the portable compiler ZIP on GitHub and publishes it as a release, so nothing large is uploaded from a
+# developer's connection. The game-independent toolchain (Python, LLVM, runtime dependencies, Ninja, zlib, shader
+# translator, licenses) is reused from an earlier release asset and its manifest hashes are checked; the source comes
+# from the tagged commit (tools/rebase_compiler_release.py). No game content is involved at any step.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and release (for example v1.0.1)"
+        required: true
+      base:
+        description: "Earlier release whose toolchain is reused"
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag || github.ref_name }}
+      BASE: ${{ inputs.base || 'v1.0.0' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: Check the tag matches VERSION
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ("v$version" -ne $env:TAG) { throw "VERSION $version does not match tag $env:TAG" }
+          if (-not (Test-Path "docs/releases/$env:TAG.md")) { throw "docs/releases/$env:TAG.md (release notes) is missing" }
+          "VERSION=$version" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Download the base release toolchain
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "base"
+          gh release download $env:BASE -R $env:GITHUB_REPOSITORY -p "*-win64.zip" -D $dir
+          $zip = Get-ChildItem $dir -Filter *.zip | Select-Object -First 1
+          tar -xf $zip.FullName -C $dir
+          $root = Get-ChildItem $dir -Directory | Select-Object -First 1
+          "BASE_DIR=$($root.FullName)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Test the icon and link rule with the bundled Clang and Ninja
+        shell: pwsh
+        working-directory: tests/hwaoi
+        env:
+          HWAOI_TEST_CLANG: ${{ env.BASE_DIR }}\llvm\bin\clang.exe
+          HWAOI_TEST_NINJA: ${{ env.BASE_DIR }}\bin\ninja.exe
+          PYTHONUTF8: "1"
+        run: |
+          & "$env:BASE_DIR\python\python.exe" -s -m unittest -v test_game_icon
+          if ($LASTEXITCODE -ne 0) { throw "tests failed" }
+
+      - name: Build the compiler ZIP
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          $name = "Hyrule-Warriors-AOI-Recomp-Optimized-$env:TAG"
+          $out = Join-Path $env:RUNNER_TEMP "out\$name"
+          $zip = Join-Path $env:RUNNER_TEMP "dist\$name-win64.zip"
+          & "$env:BASE_DIR\python\python.exe" -E -s tools/rebase_compiler_release.py $env:BASE_DIR $out $zip $env:VERSION
+          if ($LASTEXITCODE -ne 0) { throw "packaging failed" }
+          "OUT_DIR=$out" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "ZIP=$zip" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Verify the extracted ZIP
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "verify"
+          New-Item -ItemType Directory $dir | Out-Null
+          tar -xf $env:ZIP -C $dir
+          $bundle = (Get-ChildItem $dir -Directory | Select-Object -First 1).FullName
+          & "$bundle\python\python.exe" -E -s "$bundle\source\compiler\backend.py" check --bundle $bundle
+          if ($LASTEXITCODE -ne 0) { throw "bundle check failed" }
+          if (-not (Test-Path "$bundle\Hyrule Warriors AOI Recomp Optimized Compiler.exe")) { throw "launcher missing" }
+
+      - name: Compiler window self-test
+        continue-on-error: true   # needs a desktop session for Tk; informative only
+        shell: pwsh
+        run: |
+          & "$env:OUT_DIR\python\python.exe" -E -s "$env:OUT_DIR\source\compiler\gui.py" --selftest
+          if ($LASTEXITCODE -ne 0) { throw "self-test failed" }
+
+      - name: Publish the release
+        shell: pwsh
+        run: |
+          gh release create $env:TAG $env:ZIP "$env:ZIP.sha256" -R $env:GITHUB_REPOSITORY --verify-tag --latest `
+            --title "Hyrule Warriors AOI Recomp Optimized $env:VERSION" --notes-file "docs/releases/$env:TAG.md"
