@@ -136,7 +136,13 @@ class Tee:
         self.stream, self.log = stream, log
     def write(self, value):
         if self.stream:
-            self.stream.write(value)
+            try:
+                self.stream.write(value)
+            except UnicodeEncodeError:
+                # Dump names often use U+A789 for ':'; a cp1252 console cannot show it. compiler.log keeps
+                # the exact text, the console gets a replacement character instead of a failed build.
+                encoding = getattr(self.stream, "encoding", None) or "ascii"
+                self.stream.write(value.encode(encoding, "replace").decode(encoding))
             self.stream.flush()
         self.log.write(value)
         self.log.flush()

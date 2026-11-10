@@ -31,6 +31,16 @@ class CompilerFrontendTests(unittest.TestCase):
             expected["romfs_inventory"] = romfs_inventory(select_romfs(archive, archive.packages))
         return path, expected, payloads
 
+    def test_log_tee_survives_dump_names_a_legacy_console_cannot_encode(self):
+        import io
+        name = "Hyrule Warriors꞉ Age of Imprisonment + Update 1.0.3 + DLC.nup"
+        console, log = io.TextIOWrapper(io.BytesIO(), encoding="cp1252"), io.StringIO()
+        tee = backend.Tee(console, log)
+        tee.write(f"+ prepare-romfs --nup {name}\n")
+        self.assertEqual(log.getvalue(), f"+ prepare-romfs --nup {name}\n")
+        console.seek(0)
+        self.assertIn("Warriors? Age", console.read())
+
     def test_standalone_preflight_and_extraction_use_the_same_exact_package(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp);path, expected, payloads = self.standalone(folder)
