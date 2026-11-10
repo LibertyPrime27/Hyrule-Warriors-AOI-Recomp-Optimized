@@ -135,6 +135,7 @@ def package(args):
         "Complete standalone-update NUPs without a base record are accepted after module/resource inventory checks.\n"
         "Partial updates need the matching base game. DLC/addon packages merged into the NUP are installed\n"
         "under work/game/aoc and offered to the game as installed add-on content.\n"
+        "Optional fields: Update file (a separate update NUP for a base-only game file) and DLC file (a DLC NUP).\n"
         "Encrypted XCI/NSP files and other builds are not supported. No game, keys or firmware is included.\n"
         "Keep the source NUP and compiled output at their original paths. Output and logs remain local.\n"
         "The compiled game needs an AVX2 CPU, Vulkan graphics and sufficient RAM/VRAM (32 GiB RAM recommended).\n"

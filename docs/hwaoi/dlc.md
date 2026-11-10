@@ -45,6 +45,8 @@ before this change).
   newest data patch are merged by path; unchanged installs are reused.
   Packages for other titles, and data patches without their add-on, are logged
   and skipped.
+- **DLC in its own NUP:** select it as **DLC file** in the compiler window (or pass `--dlc-nup` to
+  `compiler/backend.py build`). It must hold at least one HWAoI add-on.
 - **DLC dumped separately:** extract the add-on's RomFS with your own tools,
   then run
   `python tools/hwaoi_aoc.py from-dir <extracted romfs> <output>/work/game/aoc --index <N>`.

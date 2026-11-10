@@ -111,7 +111,7 @@ class CompilerCacheTests(unittest.TestCase):
                 if not (folder / "main").is_file():
                     raise FileNotFoundError("missing synthetic module")
                 return {"exefs_sha256": hashes}
-            def extract(archive, folder):
+            def extract(archive, folder, update=None):
                 self.put(folder, "main")
             def tool(b, o, *args):
                 action = args[2]; calls.append(action)

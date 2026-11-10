@@ -141,6 +141,12 @@ def resource_cache(folder, identity, exefs, nup, previous, prepared=False):
         require(index.get("exefs_sha256") == exefs and index.get("nup_header_sha256") == identity["header"] and
                 index.get("nup_toc_sha256") == identity["toc"] and index.get("nup_size") == identity["size"] and
                 Path(index["nup_path"]).resolve() == nup.resolve(), "Cache source mismatch")
+        update = identity.get("update")
+        recorded = index.get("update_nup")
+        require((update is None and recorded is None) or (
+                update is not None and recorded is not None and recorded.get("size") == update["size"] and
+                recorded.get("header_sha256") == update["header"] and recorded.get("toc_sha256") == update["toc"]),
+                "Cache update source mismatch")
         stat = cache.stat()
         require(stat.st_size == index["cache_size"], "Cache size mismatch")
         stamp = {"size": stat.st_size, "mtime": stat.st_mtime_ns, "ctime": stat.st_ctime_ns,

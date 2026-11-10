@@ -1,4 +1,4 @@
-"""Window for selecting a user-supplied NUP and compiling it locally."""
+"""Window for selecting a user-supplied NUP (plus an optional update or DLC NUP) and compiling it locally."""
 from pathlib import Path
 import argparse
 import ctypes
@@ -22,13 +22,14 @@ class Window:
         self.process = None
         self.events = queue.Queue()
         self.nup, self.output = tk.StringVar(), tk.StringVar()
+        self.update_nup, self.dlc_nup = tk.StringVar(), tk.StringVar()   # optional; empty = not used
         self.resolution = tk.StringVar(value="1920x1080")
         self.unlock = tk.BooleanVar(value=False)
         self.jobs = tk.IntVar(value=0)
         self.status = tk.StringVar(value="Select your game NUP and a new or existing HWAoI output folder.")
         root.title("HWAoI Recomp Compiler")
-        root.geometry("860x690")
-        root.minsize(740, 610)
+        root.geometry("860x790")
+        root.minsize(740, 700)
         style = ttk.Style(root)
         style.theme_use("vista" if "vista" in style.theme_names() else "clam")
         style.configure("Title.TLabel", font=("Segoe UI", 20, "bold"))
@@ -36,25 +37,36 @@ class Window:
         panel = ttk.Frame(root, padding=24)
         panel.pack(fill="both", expand=True)
         panel.columnconfigure(1, weight=1)
-        panel.rowconfigure(10, weight=1)
+        panel.rowconfigure(13, weight=1)
         ttk.Label(panel, text="HWAoI Recomp Compiler", style="Title.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
         ttk.Label(panel, text="Build the experimental Windows version from your own game files.", style="Sub.TLabel").grid(
             row=1, column=0, columnspan=3, sticky="w", pady=(5, 22))
         self.fields = []
+        panel.columnconfigure(3, weight=0)
         for row, label, var, picker in ((2, "Game file (.nup)", self.nup, self.pick_nup),
-                                        (3, "Output folder", self.output, self.pick_output)):
+                                        (3, "Update file (.nup, optional)", self.update_nup, self.pick_update),
+                                        (4, "DLC file (.nup, optional)", self.dlc_nup, self.pick_dlc),
+                                        (6, "Output folder", self.output, self.pick_output)):
             ttk.Label(panel, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=7)
             entry = ttk.Entry(panel, textvariable=var)
             entry.grid(row=row, column=1, sticky="ew")
             button = ttk.Button(panel, text="Browse...", command=picker)
             button.grid(row=row, column=2, padx=(10, 0))
             self.fields.extend((entry, button))
-        ttk.Label(panel, text="Native resolution").grid(row=4, column=0, sticky="w", pady=9)
+            if var in (self.update_nup, self.dlc_nup):
+                clear = ttk.Button(panel, text="Clear", width=6, command=lambda v=var: v.set(""))
+                clear.grid(row=row, column=3, padx=(6, 0))
+                self.fields.append(clear)
+        ttk.Label(panel, style="Sub.TLabel", wraplength=780, text=
+                  "Leave Update and DLC blank if your game file already includes them. Use Update only when the game "
+                  "file is the base game and the update is a separate NUP.").grid(
+                      row=5, column=0, columnspan=4, sticky="w", pady=(0, 8))
+        ttk.Label(panel, text="Native resolution").grid(row=7, column=0, sticky="w", pady=9)
         resolution = ttk.Combobox(panel, textvariable=self.resolution, values=RESOLUTIONS, state="readonly", width=18)
-        resolution.grid(row=4, column=1, sticky="w")
+        resolution.grid(row=7, column=1, sticky="w")
         self.fields.append(resolution)
         options = ttk.Frame(panel)
-        options.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 5))
+        options.grid(row=8, column=0, columnspan=4, sticky="w", pady=(4, 5))
         unlock = ttk.Checkbutton(options, text="Enable experimental 30 / 60 / 90 / 120 FPS controls", variable=self.unlock)
         unlock.pack(side="left")
         ttk.Label(options, text="    Build jobs (0 = auto)").pack(side="left")
@@ -63,22 +75,23 @@ class Window:
         self.fields.extend((unlock, jobs))
         ttk.Label(panel, foreground="#875300", wraplength=780, text=
                   "Non-60 FPS modes currently accelerate gameplay. Higher resolutions are unstable. "
-                  "1080p / 60 FPS is the testing baseline.").grid(row=6, column=0, columnspan=3, sticky="w", pady=(5, 9))
+                  "1080p / 60 FPS is the testing baseline.").grid(row=9, column=0, columnspan=4, sticky="w", pady=(5, 9))
         ttk.Label(panel, style="Sub.TLabel", wraplength=780, text=
-                  "Windows 10/11 x64, AVX2 CPU and Vulkan graphics required. Keep the source NUP after compiling. "
+                  "Windows 10/11 x64, AVX2 CPU and Vulkan graphics required. Keep the game NUP after compiling "
+                  "(update and DLC files are copied into the output). "
                   "Allow at least 20 GiB of free output space; compiling may take a while.").grid(
-                      row=7, column=0, columnspan=3, sticky="w", pady=(0, 14))
+                      row=10, column=0, columnspan=4, sticky="w", pady=(0, 14))
         actions = ttk.Frame(panel)
-        actions.grid(row=8, column=0, columnspan=3, sticky="ew")
+        actions.grid(row=11, column=0, columnspan=4, sticky="ew")
         self.build_button = ttk.Button(actions, text="Compile / update", command=self.compile)
         self.build_button.pack(side="left")
         self.launch_button = ttk.Button(actions, text="Open compiled game", command=self.launch)
         self.launch_button.pack(side="left", padx=9)
         self.cancel_button = ttk.Button(actions, text="Cancel build", command=self.cancel, state="disabled")
         self.cancel_button.pack(side="right")
-        ttk.Label(panel, textvariable=self.status, wraplength=780).grid(row=9, column=0, columnspan=3, sticky="w", pady=(15, 7))
+        ttk.Label(panel, textvariable=self.status, wraplength=780).grid(row=12, column=0, columnspan=4, sticky="w", pady=(15, 7))
         self.log = ScrolledText(panel, height=13, font=("Consolas", 9), state="disabled", background="#f5f6f8", relief="flat")
-        self.log.grid(row=10, column=0, columnspan=3, sticky="nsew")
+        self.log.grid(row=13, column=0, columnspan=4, sticky="nsew")
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after(100, self.poll)
 
@@ -86,6 +99,18 @@ class Window:
         value = filedialog.askopenfilename(title="Select your HWAoI NUP", filetypes=[("NUP game package", "*.nup")])
         if value:
             self.nup.set(value)
+
+    def pick_update(self):
+        value = filedialog.askopenfilename(title="Select the game's update NUP (optional)",
+                                           filetypes=[("NUP game package", "*.nup")])
+        if value:
+            self.update_nup.set(value)
+
+    def pick_dlc(self):
+        value = filedialog.askopenfilename(title="Select the game's DLC NUP (optional)",
+                                           filetypes=[("NUP game package", "*.nup")])
+        if value:
+            self.dlc_nup.set(value)
 
     def pick_output(self):
         parent = filedialog.askdirectory(title="Select an existing HWAoI output or a parent folder for a new build")
@@ -97,6 +122,8 @@ class Window:
                     state = json.loads((selected / STATE).read_text(encoding="utf-8"))
                     if not self.nup.get():
                         self.nup.set(state.get("nup", ""))
+                        self.update_nup.set(state.get("update_nup") or "")
+                        self.dlc_nup.set(state.get("dlc_nup") or "")
                     self.resolution.set(state.get("resolution", "1920x1080"))
                     self.unlock.set(state.get("rate_unlock", False))
                 except (OSError, ValueError):
@@ -140,6 +167,12 @@ class Window:
         try:
             if not Path(self.nup.get()).is_file() or not self.output.get().strip():
                 raise ValueError("Choose your game NUP and output folder first.")
+            for name, var in (("Update", self.update_nup), ("DLC", self.dlc_nup)):
+                value = var.get().strip()
+                if value and not Path(value).is_file():
+                    raise ValueError(f"The {name} file does not exist. Choose it again, or click Clear to leave it empty.")
+                if value and Path(value).resolve() == Path(self.nup.get()).resolve():
+                    raise ValueError(f"The {name} file is the game file itself. Click Clear to leave it empty.")
             jobs = self.jobs.get()
             if not 0 <= jobs <= 8:
                 raise ValueError("Build jobs must be 0 (automatic) or between 1 and 8.")
@@ -147,6 +180,10 @@ class Window:
             messagebox.showerror("Check your selection", str(error))
             return
         extra = ["--nup", self.nup.get(), "--jobs", str(jobs), "--resolution", self.resolution.get()]
+        if self.update_nup.get().strip():
+            extra += ["--update-nup", self.update_nup.get().strip()]
+        if self.dlc_nup.get().strip():
+            extra += ["--dlc-nup", self.dlc_nup.get().strip()]
         if self.unlock.get():
             extra.append("--unlock")
         self.start("build", extra)
@@ -203,6 +240,7 @@ def main():
         root.update()
         assert not window.unlock.get() and window.resolution.get() == "1920x1080"
         assert window.jobs.get() == 0
+        assert window.update_nup.get() == "" and window.dlc_nup.get() == ""
         for widget in (window.build_button, window.launch_button, window.cancel_button, window.log):
             x, y = widget.winfo_rootx() - root.winfo_rootx(), widget.winfo_rooty() - root.winfo_rooty()
             assert x >= 0 and y >= 0 and x + widget.winfo_width() <= root.winfo_width()

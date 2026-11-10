@@ -1,11 +1,12 @@
 """Prepare a read-only NUP-backed RomFS: raw extents stay in the original NUP.
 
-Only compressed selected files are expanded into cache.bin. Runtime addresses
+Only compressed selected files (and every file of a separate update NUP) are written to cache.bin. Runtime addresses
 describe a virtual concatenation [original NUP][cache.bin], not a physical image.
 Compressed payloads are verified here; all payloads are verified on first open by
 the runtime. The original NUP is never changed and no loose resource tree is made.
 """
 from __future__ import annotations
+import contextlib
 import hashlib
 import json
 import os
@@ -79,29 +80,112 @@ def verified_application(archive, expected):
     return packages, exefs, files
 
 
+def check_tree(names):
+    """Reject invalid virtual paths and file/directory shadows across merged packages."""
+    names = set(names)
+    for name in names:
+        parts = name.split("/")
+        require(all(p and p not in (".", "..") for p in parts), "invalid virtual RomFS path")
+        require(not any("/".join(parts[:i]) in names for i in range(1, len(parts))), "RomFS file/directory conflict")
+
+
 def select_romfs(archive, packages):
     selected = {}
     for package in packages:
         if package.romfs_dir != ABSENT:
             selected.update(dict(archive.walk(package.romfs_dir)))
     require(bool(selected), "selected packages contain no RomFS")
-    # Prevent ambiguous file/directory shadows across packages.
-    for name in selected:
-        parts = name.split("/")
-        require(all(p and p not in (".", "..") for p in parts), "invalid virtual RomFS path")
-        require(not any("/".join(parts[:i]) in selected for i in range(1, len(parts))), "RomFS file/directory conflict")
+    check_tree(selected)
     return sorted(selected.items(), key=lambda item: item[0].encode("utf-8"))
 
 
-def prepare(nup_path, output, expected, reserve_bytes=8 << 30):
+def verified_with_update(archive, update_archive, expected):
+    """Base game in the game NUP plus the newest HWAoI update from a separate update NUP.
+
+    The pair is verified exactly like one base + update NUP: the newest update (from either file) shadows the base
+    by path, and the merged ExeFS and RomFS must match the profiled build. Add-ons in either file are left to
+    tools/hwaoi_aoc.py. Returns (chosen [(archive, package)], exefs {name: (archive, member)},
+    files [(path, archive, member)] sorted by path bytes).
+    """
+    title = int(expected["title_id"], 16)
+    bases = [p for p in archive.packages if p.kind == 0]
+    require(len(bases) == 1 and bases[0].title_id == title,
+            "With a separate update NUP, the game NUP must contain the HWAoI base game. "
+            "A game NUP that already includes the update needs no update NUP.")
+    updates = [(a, p) for a in (archive, update_archive) for p in a.packages
+               if p.kind == 1 and p.title_id in (title, title | 0x800)]
+    require(any(a is update_archive for a, _ in updates),
+            "The update NUP contains no HWAoI update. Leave Update NUP empty, or select the game's update dump.")
+    newest = max(p.version for _, p in updates)
+    latest = [(a, p) for a, p in updates if p.version == newest]
+    require(len(latest) == 1, "Game and update NUPs contain ambiguous updates at the same NCM version")
+    chosen = [(archive, bases[0]), latest[0]]
+    require(newest == expected["ncm_version"],
+            f"NUP update version mismatch: requires NCM {expected['ncm_version']} (not a display version)")
+    exefs = {}
+    for a, p in chosen:
+        if p.exefs_dir != ABSENT:
+            for name, member in a.walk(p.exefs_dir):
+                exefs[name] = (a, member)
+    require({name: m.sha256 for name, (_, m) in exefs.items()} == expected["exefs_sha256"],
+            "Game + update ExeFS does not match the verified HWAoI profile. "
+            "Wrong build or incomplete game dump; no patches were applied.")
+    selected = {}
+    for a, p in chosen:
+        if p.romfs_dir != ABSENT:
+            for name, member in a.walk(p.romfs_dir):
+                selected[name] = (a, member)
+    require(bool(selected), "selected packages contain no RomFS")
+    check_tree(selected)
+    files = sorted(((name, a, m) for name, (a, m) in selected.items()), key=lambda item: item[0].encode("utf-8"))
+    require(romfs_inventory([(name, m) for name, _, m in files]) == expected.get("romfs_inventory"),
+            "Game + update RomFS inventory does not match the complete supported game. "
+            "Check that the update NUP belongs to this game dump. A modified resource tree is unsupported.")
+    return chosen, exefs, files
+
+
+def verified_game(archive, expected, update_archive=None):
+    """verified_application, or verified_with_update when a separate update NUP is given; same return shape as the latter."""
+    if update_archive is None:
+        packages, exefs, files = verified_application(archive, expected)
+        return ([(archive, p) for p in packages], {name: (archive, m) for name, (_, m) in exefs.items()},
+                [(name, archive, m) for name, m in files])
+    return verified_with_update(archive, update_archive, expected)
+
+
+def nup_identity(archive):
+    return {"path": str(archive.path), "size": archive.file_size, "header_sha256": archive.header_sha256,
+            "toc_sha256": archive.toc_sha256}
+
+
+def _copy_raw(archive, member, cache, cache_hash, chunk=8 << 20):
+    """Stream an uncompressed member into the cache, verifying its SHA-256 (members may exceed the reader's bound)."""
+    digest = hashlib.sha256()
+    done = 0
+    while done < member.size:
+        data = archive._read(member.offset + done, min(chunk, member.size - done))
+        digest.update(data)
+        cache.write(data)
+        cache_hash.update(data)
+        done += len(data)
+    require(digest.hexdigest() == member.sha256, f"update member SHA-256 mismatch: {member.name}")
+
+
+def prepare(nup_path, output, expected, reserve_bytes=8 << 30, update_path=None):
+    """Raw game-NUP members stay in place; compressed members and every update-NUP member go to cache.bin.
+
+    The runtime reads [game NUP][cache.bin] only, so a separate update NUP is needed for preparation, not for play.
+    """
     output = Path(output).resolve()
     require(not output.exists(), "RomFS output exists; choose a new directory")
     output.parent.mkdir(parents=True, exist_ok=True)
-    with Nup(nup_path) as archive:
-        before = archive.path.stat()
-        packages, exefs, files = verified_application(archive, expected)
+    with Nup(nup_path) as archive, (Nup(update_path) if update_path else contextlib.nullcontext()) as update:
+        require(update is None or update.path != archive.path, "The update NUP must be a different file from the game NUP")
+        before = [a.path.stat() for a in (archive, update) if a is not None]
+        chosen, exefs, files = verified_game(archive, expected, update)
         actual = {name: member.sha256 for name, (_, member) in exefs.items()}
-        unique = {(m.offset, m.stored_size, m.sha256): m for _, m in files if m.codec == 1}
+        cached = lambda a, m: a is not archive or m.codec == 1
+        unique = {(id(a), m.offset, m.stored_size, m.sha256): m for _, a, m in files if cached(a, m)}
         estimated = sum((m.size + 15) & ~15 for m in unique.values())
         require(shutil.disk_usage(output.parent).free >= estimated + reserve_bytes,
                 f"RomFS cache needs {estimated} bytes plus {reserve_bytes} bytes free headroom")
@@ -113,32 +197,36 @@ def prepare(nup_path, output, expected, reserve_bytes=8 << 30):
         t0 = time.monotonic()
         # A failed preparation leaves only an explicitly incomplete, fresh output.
         with (output / "cache.bin.part").open("xb") as cache:
-            for i, (name, member) in enumerate(files):
-                if member.codec == 0:
+            for i, (name, a, member) in enumerate(files):
+                if not cached(a, member):
                     virtual_offset = member.offset
                 else:
-                    key = member.offset, member.stored_size, member.sha256
+                    key = id(a), member.offset, member.stored_size, member.sha256
                     if key not in locations:
-                        data = archive.read_member(member)
                         padding = (-offset) % 16
                         if padding:
                             cache.write(bytes(padding))
                             cache_hash.update(bytes(padding))
                             offset += padding
                         locations[key] = archive.file_size + offset
-                        cache.write(data)
-                        cache_hash.update(data)
-                        offset += len(data)
+                        if member.codec == 1:
+                            data = a.read_member(member)
+                            cache.write(data)
+                            cache_hash.update(data)
+                        else:
+                            _copy_raw(a, member, cache, cache_hash)
+                        offset += member.size
                         verified += 1
                     virtual_offset = locations[key]
                 entries.append({"path": name, "offset": virtual_offset, "size": member.size,
-                                "sha256": member.sha256, "storage": "nup" if member.codec == 0 else "cache"})
+                                "sha256": member.sha256, "storage": "cache" if cached(a, member) else "nup"})
                 if i % 200 == 0 or i + 1 == len(files):
                     print(f"RomFS {i + 1}/{len(files)}, cache {offset / 2**30:.2f} GiB, {time.monotonic()-t0:.1f}s", flush=True)
             cache.flush()
             os.fsync(cache.fileno())
-        after = archive.path.stat()
-        require((before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns), "source NUP changed during preparation")
+        after = [a.path.stat() for a in (archive, update) if a is not None]
+        require([(s.st_size, s.st_mtime_ns) for s in before] == [(s.st_size, s.st_mtime_ns) for s in after],
+                "source NUP changed during preparation")
         with archive.path.open("rb") as stream:
             header = stream.read(0x80)
         toc_offset, toc_size = struct.unpack_from("<QQ", header, 8)
@@ -151,13 +239,15 @@ def prepare(nup_path, output, expected, reserve_bytes=8 << 30):
                     "nup_toc_offset": toc_offset, "nup_toc_size": toc_size,
                     "cache_size": offset, "cache_sha256": cache_hash.hexdigest(),
                     "romfs_size": archive.file_size + offset, "romfs_sha256": "",
-                    "files": entries, "selected_packages": [p.index for p in packages],
+                    "files": entries, "selected_packages": [p.index for a, p in chosen if a is archive],
                     "compressed_extents_verified": verified, "raw_payload_verification": "runtime-first-open"}
+        if update is not None:
+            manifest["update_nup"] = {**nup_identity(update), "selected_packages": [p.index for a, p in chosen if a is update]}
         (output / "cache.bin.part").rename(output / "cache.bin")
         pending = output / "index.json.part"
         pending.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         pending.rename(output / "index.json")
         marker.write_text(json.dumps({"status": "complete", "files": len(files), "cache_bytes": offset}), encoding="utf-8")
         return {"directory": str(output), "files": len(files), "cache_bytes": offset,
-                "raw_bytes_not_copied": sum(m.size for _, m in files if m.codec == 0),
+                "raw_bytes_not_copied": sum(m.size for _, a, m in files if not cached(a, m)),
                 "verification": manifest["source"], "storage": STORAGE}
