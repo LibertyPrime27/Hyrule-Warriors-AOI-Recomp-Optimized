@@ -70,6 +70,10 @@ def inspect_nup(path):
             print(f"  NUP package {package.index}: {kind}, title={package.title_id:016X}, "
                   f"NCM={package.version}, standalone={bool(package.flags & 1)}", flush=True)
         packages, _, _ = verified_application(archive, nup_profile())
+        addons = sum(p.kind in (2, 3) for p in archive.packages)
+        if addons:
+            print(f"  Skipping {addons} DLC/addon package(s); compiling the verified base game + update only "
+                  "(DLC content is not loaded yet).", flush=True)
         if packages[0].kind == 1:
             print("  No base record: using the standalone update with the complete verified game inventory.", flush=True)
         return {"header": archive.header_sha256, "toc": archive.toc_sha256, "size": archive.file_size}

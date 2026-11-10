@@ -111,9 +111,45 @@ class RomfsTests(unittest.TestCase):
                 # synthetic RomFS at a separate, partial tree in this fixture.
                 with self.assertRaisesRegex(ValueError, "RomFS inventory"):
                     verified_application(archive, expected)
-            with archive_of([packages[1], {"kind": 2, "title_id": TITLE_ID + 1, "files": files}]) as archive:
-                with self.assertRaisesRegex(ValueError, "DLC/addon"):
-                    verified_application(archive, expected)
+            dlc = {"kind": 2, "title_id": TITLE_ID + 0x1001, "files": [("dlc.bin", b"addon", 0)]}
+            dlc_update = {"kind": 3, "title_id": TITLE_ID + 0x1001, "version": 65536,
+                          "files": [("dlc.bin", b"addon v2", 0)]}
+            with archive_of([packages[1], dlc, dlc_update]) as archive:
+                # Merged DLC is skipped: only the standalone update is selected and
+                # its resource inventory stays exactly the profiled one.
+                chosen, _, selected = verified_application(archive, expected)
+                self.assertEqual([p.index for p in chosen], [0])
+                self.assertNotIn("dlc.bin", dict(selected))
+
+    def test_base_update_with_merged_dlc_selects_application_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            payloads = {"raw.bin": b"raw fixture bytes", "z.bin": b"compressed fixture" * 1024}
+            files = [(n, d, int(n == "z.bin")) for n, d in payloads.items()]
+            packages = [{"kind": 0, "version": 0, "files": [("raw.bin", b"base copy", 0)]},
+                        {"kind": 1, "version": 10, "title_id": TITLE_ID | 0x800, "files": files},
+                        {"kind": 2, "title_id": TITLE_ID + 0x1001, "files": [("dlc.bin", b"addon", 0)]},
+                        {"kind": 3, "title_id": TITLE_ID + 0x1001, "version": 65536,
+                         "files": [("dlc.bin", b"addon v2", 0)]}]
+            raw, _ = make_nup(packages)
+            for i in range(len(packages)):
+                struct.pack_into("<I", raw, 0x80 + 0x30 + i * 0x40 + 0x10, i * 2 + 1)
+            refresh_toc_hash(raw)
+            path = folder / "merged.nup"
+            path.write_bytes(raw)
+            original = path.read_bytes()
+            expected = {"title_id": f"{TITLE_ID:016X}", "ncm_version": 10,
+                        "exefs_sha256": {n: hashlib.sha256(d).hexdigest() for n, d in payloads.items()}}
+            with Nup(path) as archive:
+                expected["romfs_inventory"] = romfs_inventory(select_romfs(archive, archive.packages[:2]))
+                chosen, _, selected = verified_application(archive, expected)
+                self.assertEqual([p.index for p in chosen], [0, 1])
+                self.assertEqual(sorted(dict(selected)), ["raw.bin", "z.bin"])
+            result = prepare(path, folder / "romfs", expected, reserve_bytes=0)
+            self.assertEqual(result["files"], 2)
+            self.assertEqual(path.read_bytes(), original)
+            manifest = json.loads((folder / "romfs/index.json").read_text())
+            self.assertEqual(manifest["selected_packages"], [0, 1])
 
     def test_virtual_files_match_and_original_unchanged(self):
         with tempfile.TemporaryDirectory() as temp:

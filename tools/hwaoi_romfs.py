@@ -43,10 +43,12 @@ def verified_application(archive, expected):
     A standalone flag alone never proves a complete game. Require the complete
     profiled executable set AND resource inventory before extraction/caching.
     Keep the general NUP reader's explicit-selection analysis policy unchanged.
+
+    DLC/addon packages (kinds 2 and 3) merged into the same NUP are never
+    selected: only the base/update application packages are verified, extracted
+    and cached. The runtime still reports an empty installed add-on set, so the
+    DLC content itself stays unavailable, but a merged dump is accepted.
     """
-    require(not any(p.kind in (2, 3) for p in archive.packages),
-            "NUP contains DLC/addon packages, which this compiler does not support. "
-            "Select a game package without DLC; base + update or a complete standalone update is supported.")
     title = int(expected["title_id"], 16)
     if any(p.kind == 0 for p in archive.packages):
         packages, exefs = archive.exefs()
