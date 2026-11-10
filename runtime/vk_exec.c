@@ -53,6 +53,8 @@ static int nfw;
 // Opt-in attribution of ordered CPU readbacks versus ordinary early submits.
 // These observations never change a buffer, a draw or a synchronization point.
 static uint64_t readback_calls, readback_bytes, readback_ns, readback_max_ns, readback_16, automatic_parts;
+// Full barriers recorded (each drains the GPU and ends a render pass) and the guest's own OP_BARRIER among them.
+static uint64_t barriers_recorded, guest_barriers;
 static int readback_diagnostics_on(void) {
     static int enabled = -1;
     int value = __atomic_load_n(&enabled, __ATOMIC_ACQUIRE);
@@ -76,8 +78,28 @@ static void readback_diagnostics_frame(uint64_t frame) {
     uint64_t quads_gpu = __atomic_exchange_n(&vk_exec_frame.quads_gpu, 0, __ATOMIC_RELAXED);
     uint64_t quads_cpu = __atomic_exchange_n(&vk_exec_frame.quads_cpu, 0, __ATOMIC_RELAXED);
     extern uint64_t vk_exec_quad_runs, vk_exec_quad_batched;   // vk_exec_draw.c: QUADS conversion batches
+    extern uint64_t vk_exec_ub_updates, vk_exec_quad_stop[OP_COUNT_];   // and what ended each batch's lookahead
     uint64_t quad_runs = __atomic_exchange_n(&vk_exec_quad_runs, 0, __ATOMIC_RELAXED);
     uint64_t quad_batched = __atomic_exchange_n(&vk_exec_quad_batched, 0, __ATOMIC_RELAXED);
+    uint64_t barriers = __atomic_exchange_n(&barriers_recorded, 0, __ATOMIC_RELAXED);
+    uint64_t guest = __atomic_exchange_n(&guest_barriers, 0, __ATOMIC_RELAXED);
+    uint64_t ub_updates = __atomic_exchange_n(&vk_exec_ub_updates, 0, __ATOMIC_RELAXED);
+    uint64_t stop[OP_COUNT_];
+    uint32_t top[3] = {0, 0, 0};
+    for (uint32_t op = 0; op < OP_COUNT_; op++) {
+        stop[op] = __atomic_exchange_n(&vk_exec_quad_stop[op], 0, __ATOMIC_RELAXED);
+        for (int k = 0; k < 3; k++)
+            if (stop[op] > stop[top[k]]) {
+                for (int j = 2; j > k; j--) top[j] = top[j - 1];
+                top[k] = op;
+                break;
+            }
+    }
+    rt_log("gpu-drains: frame=%llu window=60 barriers=%llu guest_barriers=%llu ub_updates=%llu "
+           "quad_batch_stops=%s:%llu,%s:%llu,%s:%llu", (unsigned long long)frame, (unsigned long long)barriers,
+           (unsigned long long)guest, (unsigned long long)ub_updates, nvn_op_name(top[0]),
+           (unsigned long long)stop[top[0]], nvn_op_name(top[1]), (unsigned long long)stop[top[1]],
+           nvn_op_name(top[2]), (unsigned long long)stop[top[2]]);
     rt_log("gpu-readback: frame=%llu window=60 calls=%llu bytes=%llu cpu_ms=%.3f max_ms=%.3f "
            "sixteen_byte_reads=%llu automatic_parts=%llu indirect_batches=%llu quads_gpu=%llu quads_cpu=%llu "
            "quad_conversion_batches=%llu quad_draws_converted=%llu", (unsigned long long)frame,
@@ -602,6 +624,7 @@ static void barrier_to(VkExec *ex, const VkImage *want, const VkImageAspectFlags
                            .imageMemoryBarrierCount = n, .pImageMemoryBarriers = ib};
     vkCmdPipelineBarrier2(ex->cb, &di);
     ex->barrier_at = ++ex->recorded;
+    if (readback_diagnostics_on()) __atomic_fetch_add(&barriers_recorded, 1, __ATOMIC_RELAXED);
 }
 
 void vk_exec_barrier(VkExec *ex) { barrier_to(ex, NULL, NULL, 0); }
@@ -988,7 +1011,10 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         case OP_COPY_IMAGE_STRIDE: ex->copy_image_stride = ((const p_copy_stride *)a)->stride; break;
         case OP_SET_TEX_POOL: ex->tex_pool = ((const p_set_pool *)a)->pool, ex->tex_serial++; break;
         case OP_SET_SAMP_POOL: ex->samp_pool = ((const p_set_pool *)a)->pool, ex->tex_serial++; break;
-        case OP_BARRIER: vk_exec_barrier(ex); break;
+        case OP_BARRIER:
+            if (readback_diagnostics_on()) __atomic_fetch_add(&guest_barriers, 1, __ATOMIC_RELAXED);
+            vk_exec_barrier(ex);
+            break;
         case OP_WAIT_SYNC: break;   // submit preparation waited before any replay/snapshot; source may be gone
         case OP_FENCE_SYNC: break;  // represented by the whole-submit frontier, published by the front end
         case OP_DRAW: case OP_DRAW_IDX: case OP_DISPATCH: case OP_UPDATE_UB: case OP_DRAW_IDX_IND: case OP_DRAW_IND: case OP_DISPATCH_IND:

@@ -3291,6 +3291,7 @@ static int gpu_quads_graphics(const VkExec *ex, int *why, int *why_stage) {
 #define QUAD_SCAN_OPS 4096u
 static struct { const p_draw_ind *op[QUAD_RUN]; VkQuadIndirect conv[QUAD_RUN]; uint32_t n; uint64_t fence; } QB;
 uint64_t vk_exec_quad_runs, vk_exec_quad_batched;   // conversion batches and the draws they converted (diagnostics)
+uint64_t vk_exec_ub_updates, vk_exec_quad_stop[OP_COUNT_];   // UpdateUniformBuffer replays; the op ending each lookahead
 
 // The QUADS indirect draws after h that a conversion at h may cover, in order (at most cap).
 static uint32_t quads_lookahead(const p_draw_ind *first, const p_draw_ind **out, uint32_t cap) {
@@ -3314,7 +3315,9 @@ static uint32_t quads_lookahead(const p_draw_ind *first, const p_draw_ind **out,
         case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_UBO: case OP_BIND_SSBO:
         case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_PUSH_CONST: case OP_WAIT_SYNC: case OP_FENCE_SYNC:
             break;
-        default: return n;   // copies, clears, updates, barriers, counters, targets, other draws, calls, the end
+        default:   // copies, clears, updates, barriers, counters, targets, other draws, calls, the end
+            __atomic_fetch_add(&vk_exec_quad_stop[o->op], 1, __ATOMIC_RELAXED);
+            return n;
         }
         o = nvn_op_next(o);
     }
@@ -3516,6 +3519,7 @@ static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
 
 static void op_update_ub(VkExec *ex, const p_update_ub *u) {
     if (!u->size) return;
+    __atomic_fetch_add(&vk_exec_ub_updates, 1, __ATOMIC_RELAXED);
     VkMemSpan sp;
     if (!vk_mem_resolve(u->dst, u->size, &sp)) return warn_once(W_UB, "UpdateUniformBuffer to %#llx is not backed: dropped", (unsigned long long)u->dst);
     cb_res(ex);
