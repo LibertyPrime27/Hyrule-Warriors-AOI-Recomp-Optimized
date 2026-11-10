@@ -48,7 +48,6 @@ static PlatFile *image;
 #ifdef ROMFS_NUP_MODE
 static PlatFile *cache_image;
 static uint8_t *entry_hashes, *entry_verified;
-static PlatMutex verification_lock = PLAT_MUTEX_INIT;
 #endif
 static const uint8_t *image_map;
 static char image_file[2048];
@@ -170,18 +169,96 @@ static void verify_image(const char *dir) {
 }
 
 #ifdef ROMFS_NUP_MODE
+// ---- per-entry verification, remembered across runs
+// Every entry is hashed in full before its first open. A run used to start from nothing and hold one lock while it
+// hashed, so a scene's loader threads queued behind each other's multi-hundred-MiB files on every launch (HWAoI black
+// screens between scenes). Now entries are verified under one of VERIFY_STRIPES locks, and romfs-verified.bin beside
+// the index remembers which entries passed for this exact NUP, cache and hash table (identities as in the image proof
+// above); a changed NUP, cache or build starts over. TOTK_ROMFS_VERIFY=force ignores the record.
+#define VERIFY_STRIPES 64
+static PlatMutex verify_stripes[VERIFY_STRIPES];
+static char verified_file[2100];
+static volatile int64_t verify_ns, verify_bytes, verify_count;
+typedef struct {
+    char magic[16];
+    uint8_t hashes_sha256[32];
+    Identity nup, cache;
+    uint64_t count;
+} VerifiedHeader;   // followed by count bytes, 1 = verified
+_Static_assert(sizeof(VerifiedHeader) == 16 + 32 + 2 * sizeof(Identity) + 8, "verified record layout");
+
+static void verified_header(VerifiedHeader *h) {
+    memset(h, 0, sizeof *h);
+    memcpy(h->magic, "HWAOI-RFSV-1", 12);
+    for (int i = 0; i < 32; i++) {
+        unsigned v;
+        sscanf(&ROMFS_HASHES_SHA256[2 * i], "%2x", &v);
+        h->hashes_sha256[i] = (uint8_t)v;
+    }
+    h->nup = identity_of(image);
+    h->cache = identity_of(cache_image);
+    h->count = file_count;
+}
+
+static void verified_load(void) {
+    need(snprintf(verified_file, sizeof verified_file, "%s/romfs-verified.bin", index_dir) < (int)sizeof verified_file,
+         "verification record path");
+    const char *mode = cfg_get("TOTK_ROMFS_VERIFY");
+    if (mode && !strcmp(mode, "force")) return;
+    uint64_t size = 0;
+    uint8_t *data = plat_file_read(verified_file, &size);
+    if (!data) return;
+    VerifiedHeader want;
+    verified_header(&want);
+    uint64_t n = 0;
+    if (size == sizeof want + file_count && !memcmp(data, &want, sizeof want)) {
+        for (uint64_t i = 0; i < file_count; i++) n += entry_verified[i] = data[sizeof want + i] == 1;
+        rt_log("RomFS: %llu of %llu entries already verified for this NUP (%s)", (unsigned long long)n,
+               (unsigned long long)file_count, verified_file);
+    } else {
+        rt_log("RomFS: %s is for another NUP, cache or build; entries are verified again", verified_file);
+    }
+    free(data);
+}
+
+static void verified_save(void) {   // under no stripe lock; writes are whole-file and atomic
+    static PlatMutex save_lock = PLAT_MUTEX_INIT;
+    plat_mutex_lock(&save_lock);
+    size_t n = sizeof(VerifiedHeader) + (size_t)file_count;
+    uint8_t *data = malloc(n);
+    if (data) {
+        verified_header((VerifiedHeader *)data);
+        for (uint64_t i = 0; i < file_count; i++) data[sizeof(VerifiedHeader) + i] = __atomic_load_n(&entry_verified[i], __ATOMIC_ACQUIRE);
+        if (!plat_file_write_atomic(verified_file, data, n)) rt_log("RomFS: cannot write %s", verified_file);
+        free(data);
+    }
+    plat_mutex_unlock(&save_lock);
+}
+
 static void verify_entry(uint64_t i) {
     need(i < file_count, "hash entry index");
-    plat_mutex_lock(&verification_lock);
+    if (__atomic_load_n(&entry_verified[i], __ATOMIC_ACQUIRE)) return;
+    PlatMutex *m = &verify_stripes[i % VERIFY_STRIPES];
+    plat_mutex_lock(m);
+    int fresh = 0;
     if (!entry_verified[i]) {
         Entry e = entry(i);
         char expected[65], actual[65];
         hex32(entry_hashes + i * 32, expected);
+        double t0 = now_s();
         sha_range(image, e.offset, e.size, actual, 0);
         if (strcmp(expected, actual)) rt_fatal("RomFS entry %s failed SHA-256", entry_name(e));
-        entry_verified[i] = 1;
+        int64_t ns = (int64_t)((now_s() - t0) * 1e9);
+        int64_t total_ns = plat_add64(&verify_ns, ns), total = plat_add64(&verify_bytes, (int64_t)e.size);   // new totals
+        int64_t count = plat_add64(&verify_count, 1);
+        if (ns >= 100000000)
+            rt_log("RomFS: first-open verification of %s (%.1f MiB) took %.0f ms; this run %lld entries, %.2f GiB in %.1f s",
+                   entry_name(e), e.size / 1048576.0, ns / 1e6, (long long)count, total / 1073741824.0, total_ns / 1e9);
+        __atomic_store_n(&entry_verified[i], 1, __ATOMIC_RELEASE);
+        fresh = 1;
     }
-    plat_mutex_unlock(&verification_lock);
+    plat_mutex_unlock(m);
+    if (fresh) verified_save();
 }
 
 static void open_nup_storage(const char *dir) {
@@ -209,6 +286,7 @@ static void open_nup_storage(const char *dir) {
     need(!strcmp(digest, ROMFS_HASHES_SHA256), "entry hash table SHA-256");
     entry_verified = calloc(file_count ? (size_t)file_count : 1, 1);
     need(entry_verified != NULL, "entry verification allocation");
+    verified_load();
     const char *mode = cfg_get("TOTK_ROMFS_VERIFY");
     if (mode && (!strcmp(mode, "full") || !strcmp(mode, "force"))) {
         sha_range(cache_image, 0, ROMFS_CACHE_SIZE, digest, 1);
