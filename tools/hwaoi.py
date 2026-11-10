@@ -272,7 +272,7 @@ def launch_interactive(args, identity):
     env = dict(os.environ)
     # Environment overrides take precedence over inherited ini/probe settings.
     options = {"HWAOI_GPU": "vulkan", "HWAOI_FULLSCREEN": "0", "HWAOI_WINDOW_SIZE": "1280x720",
-               "HWAOI_INPUT": args.input_mode, "HWAOI_RUMBLE": "0", "HWAOI_PIPE_SYNC": "1", "HWAOI_PROGRESS": "1",
+               "HWAOI_INPUT": args.input_mode, "HWAOI_RUMBLE": "0", "HWAOI_PROGRESS": "1",
                "HWAOI_EXEFS": str(args.exefs.resolve()),
                "HWAOI_PROFILE_DIR": str(local_output(args.profile_dir, "saves")),
                "HWAOI_GSV_LOCAL_FRAME_POLICY": "1", "HWAOI_NATIVE_INFLATE": "1",
@@ -281,7 +281,9 @@ def launch_interactive(args, identity):
                "HWAOI_SHOTS": "60-1800:60", "HWAOI_SHOTS_DIR": str(report_dir / "presents"),
                "HWAOI_SHOTS_FULL": "1", "HWAOI_CORE_STALL_DIAG": "0",
                "DKB_SHADER_FAILURE_DUMP": str(report_dir / "shader-failures")}
-    for setting in ("INPUT_SCRIPT", "INPUT_RECORD", "INPUT_FEED", "XLATE_ID"):
+    options.update(pipeline_options(diagnostic=args.input_feed is not None or args.input_script is not None,
+                                    force_sync=getattr(args, "pipe_sync", False)))
+    for setting in ("INPUT_SCRIPT", "INPUT_RECORD", "INPUT_FEED", "XLATE_ID", "PIPE_SYNC", "PIPE_SKIP", "PIPE_PREBUILD"):
         for prefix in ("HWAOI_", "DKB_", "TOTK_"):
             env.pop(prefix + setting, None)
     env.update(options)
@@ -351,7 +353,27 @@ def launch_interactive(args, identity):
     return report
 
 
+def pipeline_options(diagnostic, force_sync):
+    """Vulkan pipeline policy for an interactive launch.
+
+    Synchronous builds (HWAOI_PIPE_SYNC=1) compile every first-seen pipeline on the drawing thread: the first title or
+    field scene then presents nothing for 10+ s and recorded pipelines are never prewarmed at the next boot. Normal
+    play uses the inherited background builder instead, with boot prewarm from pipeline-keys.bin, and skips only draws
+    into passes whose targets were all rendered the previous frame (strict); one-shot targets still wait for their
+    pipeline. Diagnostic scripts/feeds and --pipe-sync keep the deterministic synchronous mode that probes use.
+    """
+    if diagnostic or force_sync:
+        return {"HWAOI_PIPE_SYNC": "1"}
+    return {"HWAOI_PIPE_SYNC": "0", "HWAOI_PIPE_SKIP": "strict", "HWAOI_PIPE_PREBUILD": "1"}
+
+
 def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return dispatch(args)
+
+
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--exefs", type=Path, default=DEFAULT_EXEFS)
     sub = parser.add_subparsers(dest="action", required=True)
@@ -394,7 +416,12 @@ def main(argv=None):
     launch.add_argument("--fps", choices=("30", "60", "90", "120"), help="presentation target; 90/120 remain experimental")
     launch.add_argument("--input-script", type=Path, help="opt-in startup diagnostic script under work/reports")
     launch.add_argument("--profile-dir", type=Path, default=ROOT / "work/saves/hwaoi196608", help="local save profile under work/saves")
-    args = parser.parse_args(argv)
+    launch.add_argument("--pipe-sync", action="store_true",
+                        help="build every Vulkan pipeline on the drawing thread (old behaviour: long black stalls on new scenes)")
+    return parser
+
+
+def dispatch(args):
     try:
         identity = verify(args.exefs)
         if args.action == "verify":
