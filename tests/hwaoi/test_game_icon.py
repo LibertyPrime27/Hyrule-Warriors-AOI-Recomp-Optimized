@@ -111,7 +111,7 @@ class BuildEdgeTests(unittest.TestCase):
         import build_game
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()   # runners hand out 8.3 short temp paths; build_game resolves its inputs
             icon = root / "icon dir" / "game.ico"
             icon.parent.mkdir()
             icon.write_bytes(b"ico")
@@ -142,7 +142,7 @@ class BuildEdgeTests(unittest.TestCase):
         import build_game
         from unittest.mock import patch
         with tempfile.TemporaryDirectory(prefix="hwaoi link ") as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()   # runners hand out 8.3 short temp paths; build_game resolves its inputs
             gen = root / "gen"
             gen.mkdir()
             src = gen / "main_0000.c"
