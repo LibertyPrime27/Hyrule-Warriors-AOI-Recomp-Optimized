@@ -70,7 +70,7 @@ The 30 / 60 / 90 / 120 FPS settings are available, both in the compiler (**Allow
 
 ## Current status
 
-**Release 1.0.0, November 9, 2026.** The game boots, plays the opening movies and reaches outdoor exploration and combat. A complete playthrough has not been verified.
+**Current version: 1.0.1 (November 9, 2026).** Version 1.0.1 fixes compiling, which failed at the final link step in 1.0.0. The game boots, plays the opening movies and reaches outdoor exploration and combat. A complete playthrough has not been verified.
 
 | | Part | Progress |
 | --- | --- | --- |
