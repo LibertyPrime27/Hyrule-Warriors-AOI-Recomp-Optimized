@@ -16,8 +16,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     STARTUPINFOW startup = {.cb = sizeof startup};
     PROCESS_INFORMATION process;
     if (!CreateProcessW(python, command, NULL, NULL, FALSE, 0, NULL, folder, &startup, &process)) {
-        MessageBoxW(NULL, L"Extract the complete compiler ZIP, then open HWAoI-Compiler.exe again.",
-                    L"HWAoI Recomp Compiler", MB_OK | MB_ICONERROR);
+        MessageBoxW(NULL, L"Extract the complete compiler ZIP, then open the Hyrule Warriors AOI Recomp Optimized Compiler again.",
+                    L"Hyrule Warriors AOI Recomp Optimized Compiler", MB_OK | MB_ICONERROR);
         return 1;
     }
     CloseHandle(process.hThread);

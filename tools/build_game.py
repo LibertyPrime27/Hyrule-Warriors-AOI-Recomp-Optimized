@@ -79,7 +79,8 @@ ROOT = Path(__file__).resolve().parent.parent
 # them. MAIN_ROOT is where they land, so resolved paths still print and compare relative to a root.
 MAIN_ROOT = (ROOT / 'build').resolve().parent
 UCRT = Path(r'F:\MSYS2\ucrt64\bin')
-EXE = 'hwaoi.exe' if WIN else 'hwaoi'
+EXE = 'Hyrule Warriors AOI Recomp Optimized.exe' if WIN else 'hyrule-warriors-aoi-recomp-optimized'
+ICON = None   # --icon: the game's cover as an .ico (tools/hwaoi_icon.py), embedded as icon resource 1
 
 
 def on_path(name):
@@ -365,7 +366,7 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
         '  description = RC $in',
         '',
         'rule link',
-        '  command = $cc $ldflags @$out.rsp $libs -o $out',
+        '  command = $cc $ldflags "@$out.rsp" $libs -o "$out"',   # the game name has spaces
         '  rspfile = $out.rsp',
         '  rspfile_content = $in_newline',
         '  description = LINK $out',
@@ -403,6 +404,17 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
             if src.suffix == '.cpp':   # the Ampere lowering headers (runtime/third_party/eglantine) need C++20
                 lines.append(f'  rtflags = $rtflags -std=c++20 -I {cmd_path(RUNTIME / "third_party" / "eglantine")}')
         rt.append(o)
+    if ICON and WIN and not make_lib:
+        # Icon group 1, which the window classes load (gfx_window_win.c, splash_win.c). The .rc lives in the build
+        # folder because the icon is the user's own game artwork, never part of the source tree.
+        rc = out / 'game_icon.rc'
+        text = '1 ICON "' + Path(ICON).resolve().as_posix().replace('"', '') + '"\n'
+        if not rc.is_file() or rc.read_bytes() != text.encode('utf-8'):   # unchanged: no rebuild of the icon object
+            rc.parent.mkdir(parents=True, exist_ok=True)
+            rc.write_bytes(text.encode('utf-8'))
+        o = out / 'obj' / 'game_icon.o'
+        lines.append(f'build {ninja_path(o)}: rc {ninja_path(rc)} | {ninja_path(Path(ICON).resolve())}')
+        rt.append(o)
     objs['runtime'] = rt
     every = [o for v in objs.values() for o in v]
     exe = out / EXE
@@ -417,7 +429,7 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
         # references before the linker pulls the members with the strong definitions, which would stay out of totk.exe.
         rule = 'link_lib'
         lines += ['', 'rule link_lib',
-                  f'  command = $cc $ldflags @$out.rsp -Wl,--whole-archive {cmd_path(runtime_lib)} -Wl,--no-whole-archive $libs -o $out',
+                  f'  command = $cc $ldflags "@$out.rsp" -Wl,--whole-archive {cmd_path(runtime_lib)} -Wl,--no-whole-archive $libs -o "$out"',
                   '  rspfile = $out.rsp', '  rspfile_content = $in_newline', '  description = LINK $out']
     lines += ['', f'build {ninja_path(exe)}: {rule} ' + ' '.join(ninja_path(o) for o in every) +
               (f' | {ninja_path(runtime_lib)}' if runtime_lib else ''),
@@ -750,6 +762,7 @@ def main():
     ap.add_argument('--runtime-lib', type=Path, help=f'link against this {LIB_NAME} instead of compiling runtime/ '
                                                     f'({", ".join(sorted(INSTALL_SIDE))} and modules.c still compile)')
     ap.add_argument('--toolchain-stamp', type=Path, help='validated compiler/dependency identity; changes rebuild objects')
+    ap.add_argument('--icon', type=Path, help='an .ico to embed as the executable and window icon')
     ap.add_argument('--expected', type=Path,
                     help='expected hashes (default tools/data/expected-<display version>.json)')
     args = ap.parse_args()
@@ -767,7 +780,11 @@ def main():
             sys.exit(f'no expected hashes known for {args.version}; pass --expected')
         expected = ROOT / 'tools' / 'data' / f'expected-v{DISPLAY_VERSIONS[args.version]}.json'
     hashes = json.loads(Path(expected).read_text(encoding='utf-8'))['exefs_sha256']
-    global CLANG, AR, WINDRES, NINJA, TOOLCHAIN_BIN, DEPS
+    global CLANG, AR, WINDRES, NINJA, TOOLCHAIN_BIN, DEPS, ICON
+    if args.icon:
+        if not args.icon.is_file():
+            sys.exit(f'build_game: icon {args.icon} not found')
+        ICON = args.icon.resolve()
     if args.ninja:
         NINJA = args.ninja.resolve()
     elif not NINJA.is_file() and (ROOT / 'bin' / ('ninja' + ('.exe' if WIN else ''))).is_file():

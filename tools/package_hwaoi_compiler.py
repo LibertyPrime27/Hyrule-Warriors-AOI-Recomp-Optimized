@@ -121,11 +121,11 @@ def package(args):
             raise ValueError(f"License download hash mismatch: {name}")
         copy(cached, licenses / name)
     subprocess.run([str(args.llvm / "bin/clang.exe"), "-O2", "-mwindows", "-municode", "-Wall", "-Wextra", "-Werror",
-                    str(ROOT / "compiler/launcher.c"), "-o", str(out / "HWAoI-Compiler.exe")], check=True)
+                    str(ROOT / "compiler/launcher.c"), "-o", str(out / "Hyrule Warriors AOI Recomp Optimized Compiler.exe")], check=True)
     (out / "START-HERE.txt").write_text(
-        "HWAoI Recomp Compiler - experimental Windows x64 preview\n\n"
+        "Hyrule Warriors AOI Recomp Optimized - Compiler (experimental Windows x64 preview)\n\n"
         "1. Extract this complete ZIP to a writable folder. No Python/.NET/compiler installation is needed.\n"
-        "2. Open HWAoI-Compiler.exe. Select your own matching NUP and an output folder on a drive with 20+ GiB free.\n"
+        "2. Open Hyrule Warriors AOI Recomp Optimized Compiler.exe. Select your own matching NUP and an output folder on a drive with 20+ GiB free.\n"
         "3. Click Compile / update. After completion, click Open compiled game.\n"
         "   To reopen a build later, set Output folder to its exact path and click Open compiled game.\n\n"
         "Updates/resume: choose the existing HWAoI-Game output folder. Verified game data/generated C and native objects\n"
@@ -139,7 +139,10 @@ def package(args):
         "Encrypted XCI/NSP files and other builds are not supported. No game, keys or firmware is included.\n"
         "Keep the source NUP and compiled output at their original paths. Output and logs remain local.\n"
         "The compiled game needs an AVX2 CPU, Vulkan graphics and sufficient RAM/VRAM (32 GiB RAM recommended).\n"
-        "1080p/60 FPS is the current baseline. Non-60 FPS modes accelerate gameplay; higher resolutions are unstable.\n"
+        "1080p/60 FPS is the baseline. The 90/120 FPS settings SPEED UP the game (1.5x/2x), because gameplay advances a\n"
+        "fixed step per frame. For smoother motion at normal speed, keep 60 FPS and use frame generation (for example\n"
+        "Lossless Scaling 2x). Higher resolutions are unstable.\n"
+        "The game's icon is taken from your own NUP while compiling; no artwork ships with this ZIP.\n"
         "Progress and tested limits: source/README.md. Licenses/source: source/ and licenses/.\n"
         "The locally compiled output contains game-derived files; do not upload or redistribute it.\n",
         encoding="utf-8")

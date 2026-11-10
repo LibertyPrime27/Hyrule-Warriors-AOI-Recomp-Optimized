@@ -21,6 +21,8 @@ DEFAULT_EXEFS = ROOT / "work/game/exefs"
 DEFAULT_GENERATED = ROOT / "work/generated/hwaoi196608"
 MODULES = ("main", "subsdk0", "sdk")
 BUILD_NAME = "hwaoi196608"
+GAME_EXE = "Hyrule Warriors AOI Recomp Optimized.exe"   # tools/build_game.py EXE
+LEGACY_EXE = "hwaoi.exe"   # builds made before the rename
 
 
 def need(condition, message):
@@ -405,8 +407,9 @@ def build_parser():
     build.add_argument("--ninja", type=Path, default=Path("F:/Ninja/ninja.exe"))
     build.add_argument("--jobs", type=int, default=0, help="0 selects workers from available RAM/commit; 1..8 sets a ceiling")
     build.add_argument("--toolchain-stamp", type=Path, help="compiler/dependency identity for incremental builds")
+    build.add_argument("--icon", type=Path, help="the game's .ico (tools/hwaoi_icon.py) to embed in the executable")
     launch = sub.add_parser("launch", help="Open the experimental game with live input and local logs")
-    launch.add_argument("--exe", type=Path, default=ROOT / "work/build/hwaoi196608/hwaoi.exe")
+    launch.add_argument("--exe", type=Path, default=ROOT / "work/build/hwaoi196608" / GAME_EXE)
     launch.add_argument("--zlib", type=Path, default=Path("F:/GCC/ucrt64/bin/zlib1.dll"))
     launch.add_argument("--input-feed", type=Path, help="opt-in expiring diagnostic controls under work/reports")
     launch.add_argument("--input", dest="input_mode", choices=("auto", "keyboard", "none"), default="auto", help="physical input policy; diagnostic scripts/feed remain available")
@@ -506,10 +509,13 @@ def dispatch(args):
                 if args.toolchain_stamp:
                     need(args.toolchain_stamp.is_file(), "toolchain identity stamp is missing")
                     command += ["--toolchain-stamp", args.toolchain_stamp.resolve()]
+                if args.icon:
+                    need(args.icon.is_file(), "game icon is missing")
+                    command += ["--icon", args.icon.resolve()]
                 run(command)
                 report = {"stage": "linked experimental runtime", "output": str(out),
                           "game_boot_enabled": False, "experimental_interactive_command": "python tools/hwaoi.py launch",
-                          "playable": False, "sha256": sha256(out / "hwaoi.exe"),
+                          "playable": False, "sha256": sha256(out / GAME_EXE),
                           "exefs_sha256": identity["exefs_sha256"], "code_patch_profile": selected_profile}
                 save_json(out / "hwaoi-build.json", report)
         print(json.dumps(report, ensure_ascii=False, indent=2))

@@ -10,7 +10,7 @@ explicit expected-identity checks before any thread is paused.
 Example (use the current PID and build identity from the probe's running.json):
 
 ```powershell
-python tools/hwaoi_threads.py --pid 1234 --exe work/build/hwaoi196608/hwaoi.exe --sha256 EXPECTED_SHA256 --out work/reports/hang-new/threads-01.json
+python tools/hwaoi_threads.py --pid 1234 --exe "work/build/hwaoi196608/Hyrule Warriors AOI Recomp Optimized.exe" --sha256 EXPECTED_SHA256 --out work/reports/hang-new/threads-01.json
 ```
 
 Run it again to a fresh file to compare cycle counts and stack locations. The

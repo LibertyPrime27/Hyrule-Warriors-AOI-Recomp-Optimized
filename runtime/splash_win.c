@@ -17,6 +17,7 @@
 #include "platform/platform.h"
 #include "gfx_wsys.h"
 #include "vk.h"
+#include "game_target.h"
 
 #define SPLASH_CLASS L"HWAoISplash"
 #define TICK_MS 33
@@ -67,7 +68,7 @@ static void paint(HWND h) {
     HGDIOBJ of = SelectObject(mem, title);
     SetTextColor(mem, RGB(236, 228, 206));
     RECT tr = {0, ht * 38 / 100, w, ht * 38 / 100 + title_px * 2};
-    DrawTextW(mem, L"Hyrule Warriors: Age of Imprisonment", -1, &tr, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    DrawTextW(mem, RT_GAME_TITLE_W, -1, &tr, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
 
     wchar_t line[128];
     double p = progress(line, sizeof line / sizeof *line);
@@ -119,7 +120,7 @@ static DWORD WINAPI splash_main(LPVOID unused) {
     GetMonitorInfoW(mon, &mi);
     RECT wa = mi.rcWork;
     int x = wa.left + ((wa.right - wa.left) - cw) / 2, y = wa.top + ((wa.bottom - wa.top) - ch) / 2;
-    HWND h = CreateWindowExW(WS_EX_APPWINDOW, SPLASH_CLASS, L"Hyrule Warriors: Age of Imprisonment", WS_POPUP,
+    HWND h = CreateWindowExW(WS_EX_APPWINDOW, SPLASH_CLASS, RT_GAME_TITLE_W, WS_POPUP,
                              x, y, cw, ch, NULL, NULL, inst, NULL);
     if (!h) {
         rt_log("splash: no loading window (error %lu)", GetLastError());

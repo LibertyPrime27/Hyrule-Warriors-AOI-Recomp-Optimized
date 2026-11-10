@@ -392,7 +392,7 @@ def capture(executable, mode, report_dir, timeout, dump_shaders=False, frames=1,
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("mode", choices=["selftest", "probe-romfs", "probe-loader", "probe-cfg", "probe-kernel", "probe-services", "probe-input", "probe-storage", "probe-boot", "probe-render", "probe-present-color", "probe-vkgeometry", "play-experimental", "boot"])
-    parser.add_argument("--exe", type=Path, default=ROOT / "work/build/hwaoi196608/hwaoi.exe")
+    parser.add_argument("--exe", type=Path, default=ROOT / "work/build/hwaoi196608/Hyrule Warriors AOI Recomp Optimized.exe")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--timeout", type=int, default=45)
     parser.add_argument("--dump-shaders", action="store_true", help="retain local game-derived shader inputs under this report")

@@ -554,7 +554,8 @@ static void row_game_lang(void) {
 static void row_fps_limit() {
     if (RT_TARGET_HWAOI) {
         static const char *const vals[] = {"30", "60", "90", "120"};
-        static const char *const names[] = {"30 FPS", "60 FPS", "90 FPS (experimental)", "120 FPS (experimental)"};
+        static const char *const names[] = {"30 FPS", "60 FPS (normal speed)", "90 FPS (game runs 1.5x fast)",
+                                             "120 FPS (game runs 2x fast)"};
         opt_choice_list("TOTK_FPS_LIMIT", UI_MENU_FPS_LIMIT, vals, names, 4, UI_MENU_FPS_LIMIT_DESC);
         return;
     }

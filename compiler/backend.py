@@ -18,6 +18,7 @@ from hwrecomp.nup import Nup, extract_exefs, safe_relative
 from hwaoi_romfs import verified_application, verified_game
 import hwaoi_aoc
 import hwaoi
+import hwaoi_icon
 if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
 from compiler import cache
@@ -242,12 +243,13 @@ def build(bundle, nup, output, jobs=0, resolution="1920x1080", unlock=False, upd
         else:
             require(all(p.name == ".hwaoi-compiler.lock" for p in output.iterdir()), "Unmarked output folder is not empty")
         game = output / "work/build/hwaoi196608"
-        if (game / "hwaoi.exe").is_file():
-            try:
-                with (game / "hwaoi.exe").open("r+b"):
-                    pass
-            except OSError as error:
-                raise ValueError("Close the compiled game before updating this output folder") from error
+        for name in (hwaoi.GAME_EXE, hwaoi.LEGACY_EXE):
+            if (game / name).is_file():
+                try:
+                    with (game / name).open("r+b"):
+                        pass
+                except OSError as error:
+                    raise ValueError("Close the compiled game before updating this output folder") from error
         state = dict(existing or {})
         state.update(format="hwaoi-local-build-v1", status="incomplete", source_revision=manifest["source_revision"],
                      nup=str(nup), nup_identity=identity, resolution=resolution, rate_unlock=bool(unlock),
@@ -329,9 +331,21 @@ def build_stages(bundle, nup, output, jobs, resolution, unlock, state, manifest,
         done("generation", began)
         print("[5/6] Compiling and linking the native Windows game (this can take a while)...", flush=True)
         began = time.perf_counter()
+        icon = output / "work/game/icon.ico"   # the cover from the user's own NUP; never shipped with the source
+        try:
+            has_icon = hwaoi_icon.write_icon(nup, icon, state.get("update_nup"))
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            print(f"  The game icon could not be prepared ({error}); building without it.", flush=True)
+            has_icon = False
+        if not has_icon and icon.is_file():
+            icon.unlink()
         run_tool(bundle, output, *common, "build", "--romfs", "work/game/romfs", "--deps", output / "work/toolchain/deps",
                  "--toolchain", output / "work/toolchain/llvm", "--ninja", output / "work/toolchain/ninja.exe",
-                 "--toolchain-stamp", toolchain_stamp, "--jobs", jobs)
+                 "--toolchain-stamp", toolchain_stamp, "--jobs", jobs, *(["--icon", icon] if has_icon else []))
+        game = output / "work/build/hwaoi196608"
+        require((game / hwaoi.GAME_EXE).is_file(), "The linker did not produce the game executable")
+        if (game / hwaoi.LEGACY_EXE).is_file():   # the executable's name before the rename; free its space
+            (game / hwaoi.LEGACY_EXE).unlink()
         done("compile_link", began)
         print("[6/6] Installing the shader translator and launch settings...", flush=True)
         game = output / "work/build/hwaoi196608"
@@ -358,7 +372,7 @@ def build_stages(bundle, nup, output, jobs, resolution, unlock, state, manifest,
             cache.write_changed(game / "hwaoi.ini", "".join(lines).encode("utf-8"))
         after = nup.stat()
         require((before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns), "Source NUP changed during build")
-        state.update(status="complete", executable_sha256=hwaoi.sha256(game / "hwaoi.exe"))
+        state.update(status="complete", executable_sha256=hwaoi.sha256(game / hwaoi.GAME_EXE))
         state["timings"]["stages_total"] = round(time.perf_counter() - started, 3)
         state["timings"]["total"] = round(time.perf_counter() - total_started, 3)
         save(output / STATE, state)
@@ -378,12 +392,15 @@ def launch(bundle, output):
     require(state.get("format") == "hwaoi-local-build-v1" and state.get("status") == "complete", "Build is incomplete")
     require(inspect_nup(state["nup"], state.get("update_nup")) == state["nup_identity"],
             "Source NUP or update NUP has moved or changed")
-    game = output / "work/build/hwaoi196608/hwaoi.exe"
+    game = output / "work/build/hwaoi196608" / hwaoi.GAME_EXE
+    if not game.is_file():   # compiled before the executable was renamed
+        game = game.with_name(hwaoi.LEGACY_EXE)
+    require(game.is_file(), "The compiled game is missing; click Compile / update")
     require(hwaoi.sha256(game) == state["executable_sha256"], "Compiled executable has changed; rebuild in a fresh folder")
     env = clean_environment(bundle)
     env["HWAOI_RATE_UNLOCK"] = "1" if state["rate_unlock"] else "0"
     command = [str(bundle / "python/python.exe"), "-E", "-s", str(output / "tools/hwaoi.py"), "launch",
-               "--zlib", str(game.parent / "zlib1.dll"), "--no-captures"]
+               "--exe", str(game), "--zlib", str(game.parent / "zlib1.dll"), "--no-captures"]
     completed = subprocess.run(command, cwd=output, env=env)
     require(completed.returncode == 0, "Game launch failed; see the launch report under work/reports")
 

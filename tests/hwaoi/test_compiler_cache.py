@@ -129,7 +129,7 @@ class CompilerCacheTests(unittest.TestCase):
                 elif action == "build":
                     if fail[0]:
                         raise ValueError("synthetic compile failure")
-                    self.put(o, "work/build/hwaoi196608/hwaoi.exe", b"owned output fixture")
+                    self.put(o, "work/build/hwaoi196608/Hyrule Warriors AOI Recomp Optimized.exe", b"owned output fixture")
                 else:
                     self.fail(action)
             disk = type("Disk", (), {"free": 60 << 30})()

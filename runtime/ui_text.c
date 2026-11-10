@@ -96,8 +96,9 @@ static const char *const text_en[UI_TEXT_COUNT] = {
 
     [UI_MENU_FPS_LIMIT] = "Target frame rate",
 #if RT_TARGET_HWAOI
-    [UI_MENU_FPS_LIMIT_DESC] = "Target frame rate. Actual FPS depends on the scene and hardware. With the experimental "
-                               "native rate unlock enabled, modes other than 60 FPS currently accelerate gameplay.",
+    [UI_MENU_FPS_LIMIT_DESC] = "WARNING: 90 and 120 FPS speed up the whole game (1.5x and 2x), because gameplay advances "
+                               "one fixed step per frame. Use 60 FPS for normal speed; for smoother motion keep 60 FPS "
+                               "and add frame generation (for example Lossless Scaling 2x).",
 #else
     [UI_MENU_FPS_LIMIT_DESC] = "The most frames per second the game draws. Above 60 is experimental and needs Game speed "
                                "follows the clock.",
@@ -362,8 +363,14 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_COLOR_GAMMA_DESC] = "Ниже 1 осветляет тёмные и средние тона, выше 1 затемняет их; 1 — без изменений.",
 
     [UI_MENU_FPS_LIMIT] = "Ограничение частоты кадров",
+#if RT_TARGET_HWAOI
+    [UI_MENU_FPS_LIMIT_DESC] = "ВНИМАНИЕ: 90 и 120 FPS ускоряют всю игру (в 1,5 и 2 раза), потому что игровая логика "
+                               "делает фиксированный шаг за кадр. Для нормальной скорости выберите 60 FPS; для плавности "
+                               "оставьте 60 FPS и включите генерацию кадров (например, Lossless Scaling 2x).",
+#else
     [UI_MENU_FPS_LIMIT_DESC] = "Наибольшее число кадров в секунду. Выше 60 — экспериментальный режим, нужна «Скорость "
                                "игры по часам».",
+#endif
     [UI_MENU_FPS_30] = "30 FPS", [UI_MENU_FPS_40] = "40 FPS", [UI_MENU_FPS_45] = "45 FPS",
     [UI_MENU_FPS_60] = "60 FPS", [UI_MENU_FPS_90] = "90 FPS", [UI_MENU_FPS_120] = "120 FPS", [UI_MENU_FPS_144] = "144 FPS",
     [UI_MENU_FPS_DISPLAY] = "Как у монитора", [UI_MENU_FPS_DISPLAY_HZ] = "Как у монитора (%.0f Гц)",

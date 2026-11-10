@@ -1,95 +1,141 @@
-# HWAoI Recomp
+# Hyrule Warriors AOI Recomp Optimized
 
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
-[![Content guard](https://github.com/Alano6678/hwaoi-recomp/actions/workflows/content-guard.yml/badge.svg?branch=main)](https://github.com/Alano6678/hwaoi-recomp/actions/workflows/content-guard.yml)
-[![Stars](https://img.shields.io/github/stars/Alano6678/hwaoi-recomp?style=flat)](https://github.com/Alano6678/hwaoi-recomp/stargazers)
+[![Content guard](https://github.com/LibertyPrime27/hwaoi-recomp/actions/workflows/content-guard.yml/badge.svg)](https://github.com/LibertyPrime27/hwaoi-recomp/actions/workflows/content-guard.yml)
 
-**HWAoI Recomp** is an experimental static recompilation of *Hyrule Warriors: Age of Imprisonment* for Nintendo Switch 2 into a native Windows x86-64 application with a Vulkan renderer.
+**Hyrule Warriors AOI Recomp Optimized** is a static recompilation of *Hyrule Warriors: Age of Imprisonment* (Nintendo Switch 2) into a native Windows x86-64 game with a Vulkan renderer. It continues earlier recomp work and adds:
 
-The game's ARM64 code is translated to C ahead of time and compiled with a C/C++ runtime. An NVN 2 implementation handles graphics, translating Ampere shaders to SPIR-V for Vulkan. This project builds on [DKB Recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp).
+- large combat performance gains
+- seamless loading
+- DLC and update support
+- a game icon taken from your own copy
+
+The game's ARM64 code is translated to C ahead of time and compiled together with a C/C++ runtime. An NVN 2 implementation handles graphics and translates the game's Ampere shaders to SPIR-V for Vulkan.
 
 > [!NOTE]
-> Bring your own matching game files. No ROMs, keys, firmware, generated game code, shader payloads or game-derived executables are distributed here. Recompilation happens locally.
+> Bring your own matching game files. No ROMs, keys, firmware, generated game code, shader payloads, game artwork or game-derived executables are distributed here. Recompilation happens locally on your PC.
+
+## Credits
+
+This project stands on the work of others:
+
+- **[HWAoI Recomp](https://github.com/Alano6678/hwaoi-recomp) by Alano6678.** The original Hyrule Warriors: Age of Imprisonment recompilation: the game profile, recompiler adaptation, NVN 2 work, compiler front end and everything that first got the game booting and playable. This repository is a fork of it.
+- **[DKB Recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp) by Lucas-blip-png.** The *Donkey Kong Bananza* static recompilation that HWAoI Recomp is built on. It provides the recompiler, runtime, Vulkan/NVN layer and shader translator. The imported revision is pinned in [config/upstream.json](config/upstream.json).
+- **[Savage Wind Recomp](https://github.com/Revivedx/SavageWindRecomp).** Credited for menu adaptations.
+
+The full inherited attributions are kept in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## What this fork adds
+
+### Combat performance: about 3–4× faster fights
+
+Before this fork, crowded combat dropped to **13–18 FPS** on an RTX 3080 / i9-10850K at 1080p. The same fights now average about **57 FPS**. Three changes made the difference:
+
+- **A wrong stage-number check sent every quad draw down a stalling path.** The NVN 2 indirect QUADS conversion compared shader stages in the wrong numbering, so every quad draw fell back to a CPU readback path. That path waits for the GPU to finish. The check now uses NVN's own stage order, so quads stay on the GPU.
+- **Quad conversions are batched.** Consecutive quad draws share one compute dispatch pass and a single pair of barriers instead of paying for them per draw. The quad index buffer is now a static pattern filled once, so the extra expand shader is gone.
+- **Guest barriers are recorded only when needed.** A guest `nvnCommandBufferBarrier` used to become a full Vulkan pipeline drain. Now only masks that actually order earlier work (the ORDER bits) record a barrier. Invalidate-only barriers are dropped, which removes 80–88 % of combat drains. `TOTK_BARRIER_ELIDE=0` restores the old behaviour.
+
+Combat is now CPU-bound rather than stalled on the GPU.
+
+### Loading and stutter
+
+- **Shader pipelines build in the background**, from a pipeline key cache recorded on earlier runs. Draws whose pipeline is not ready yet are skipped instead of blocking the frame. This removes the emulator-style shader stutter and the long black stalls.
+- **Game files are verified once, not on every launch.** RomFS hash verification is saved in `romfs-verified.bin`, so later launches skip re-hashing unchanged game data. Scene loads are much shorter.
+- **A loading window with a progress bar** shows while compiled shaders load at startup, instead of a black screen. It closes on the game's first frame.
+
+### DLC and update support
+
+- **Merged NUPs work.** A NUP with the game, the 1.0.3 update and DLC merged together compiles directly. DLC packages are installed under `work/game/aoc/<index>`.
+- **The compiler window has two optional fields.** *Update file* takes a separate update NUP, which is verified together with the base game. *DLC file* takes a separate DLC NUP. Leave both blank when your game file already includes them.
+- **DLC is served to the game natively.** The runtime implements the game's add-on content calls (count, list and mount) with read-only, hash-checked mounts. See [DLC support](docs/hwaoi/dlc.md).
+- **The 1.0.3 standalone update is verified** as a complete game, even without a base record.
+
+### Frame rate: 60 FPS plus frame generation
+
+The 30 / 60 / 90 / 120 FPS settings are available, both in the compiler (**Allow 90 / 120 FPS settings**, on by default) and in the in-game **Esc** menu.
+
+> [!WARNING]
+> **90 and 120 FPS speed up the whole game (1.5× and 2×).** The game's logic advances one fixed step per frame. Live tests on build 196608 showed:
+> - walking speed ignores the scheduler clock and its time-block scale
+> - the vsync signal is already a fixed 60 Hz
+>
+> Rendering more frames therefore runs the game faster.
+
+**For smooth motion at normal speed, play at 60 FPS and use frame generation**, for example [Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/) LSFG 2× for 120 FPS output. Fullscreen (F11) is borderless rather than exclusive, so capture-based frame generation works. Turn it on after the game window appears, not during the startup loading window.
+
+### Name and icon
+
+- **The compiled game and the compiler are named "Hyrule Warriors AOI Recomp Optimized"**, including the in-game version line.
+- **The game's icon is the cover art from your own NUP.** It is read from the package metadata while compiling and embedded in the executable and game window, so no artwork ships in this repository.
 
 ## Current status
 
-**Early development build — updated November 9, 2026.** The game boots, plays both opening movies and reaches outdoor exploration and initial combat. Movement, camera controls and the opening 3D rendering work. A complete playthrough has not been verified.
-
-Native **1080p / 60 FPS** is the current testing baseline. On the RTX 4060 / Core i5-14600KF test PC, ordinary outdoor gameplay has reached approximately **60 FPS**, with initial combat reported around **45 FPS**. These are observations from the opening areas, not a whole-game performance guarantee.
-
-> [!WARNING]
-> **Play at 60 FPS. Higher frame-rate modes speed up the game.** Gameplay advances a fixed step per update, so at 90 and 120 FPS the game runs 1.5× and 2× fast. For smoother output, use frame generation over a true 60 FPS instead (see [Higher frame rates](#higher-frame-rates)).
->
-> **Higher-resolution modes are unstable.** Their 3D render sizes have been verified, but broader gameplay, UI and movie scaling are still being adapted.
+**Early development build, updated November 9, 2026.** The game boots, plays the opening movies and reaches outdoor exploration and combat. A complete playthrough has not been verified.
 
 | | Part | Progress |
 | --- | --- | --- |
 | ✅ | Static recompiler | All three guest modules generate, compile and link into a native Windows executable. |
-| ✅ | Boot and resources | The matching build passes title/module checks and loads its game resources. Automatic GPU mirroring now checks Windows system-commit headroom. |
-| ✅ | Opening movies and audio | Both opening movies play through; audio and voices work in the tested opening. |
-| ✅ | Movement and camera | Keyboard/mouse movement and camera controls work; SDL controller support is integrated. |
-| 🔧 | Rendering | Outdoor scenes and initial combat render. Small CPU-authored RGBA8 comparison textures up to 8×8 now have a tested conversion path; the reported crash scenes await retesting. |
-| 🔧 | Combat performance | NVN2 indirect QUADS now have a GPU argument/index conversion path, avoiding their ordered CPU readback. Local GPU/recorder tests pass; crowded-scene FPS gains still need measurement. |
-| 🧪 | 30 / 60 / 90 / 120 FPS | The native unlock exceeds 60 FPS. Inherited/fixed scheduler steps now follow each node's elapsed clock and preserve parent time scales. Live clock checks pass at all four targets, but gameplay ignores that clock: movement advances a fixed step per update, so 90/120 FPS run 1.5×/2× fast. Use 60 FPS plus frame generation. |
-| 🧪 | Native resolution presets | 720p, 1080p, 1440p and 4K 3D dimensions are confirmed in GPU captures. Higher resolutions remain experimental and unstable. |
-| 🔧 | Playthrough coverage | Opening exploration and initial combat only; later missions remain unverified. |
+| ✅ | Boot and resources | Title/module checks pass, and resources load from a verified cache. Verification is persisted between launches. |
+| ✅ | Opening movies and audio | Both opening movies play through; audio and voices work. |
+| ✅ | Movement and camera | Keyboard/mouse and SDL controller input work. |
+| ✅ | Update 1.0.3 and DLC | Merged or separate update/DLC NUPs compile; add-on content mounts in game. |
+| ✅ | Combat performance | About 57 FPS average in crowded fights on the test PC (previously 13–18). |
+| 🔧 | Rendering | Outdoor scenes and combat render. Some reported crash scenes await retesting. |
+| 🧪 | 90 / 120 FPS | Selectable, but they speed up gameplay. Use 60 FPS plus frame generation. |
+| 🧪 | Native resolution presets | 720p, 1080p, 1440p and 4K render sizes are confirmed. Higher resolutions are unstable. |
+| 🔧 | Playthrough coverage | Opening exploration and early combat only; later missions remain unverified. |
 
 ✅ working in the tested scope · 🔧 adaptation in progress · 🧪 experimental
 
-## Trying the development build
+## Using it
 
-The [Releases page](https://github.com/Alano6678/hwaoi-recomp/releases) provides an experimental Windows x64 compiler package. Extract the complete ZIP, open **HWAoI-Compiler.exe**, select your own matching **NUP** and an output folder, then click **Compile / update**. Python, the C/C++ toolchain and the shader translator are bundled; no separate tool installation is needed.
+1. **Get the compiler.** No release ZIP of this fork is published yet. Build the compiler package with `tools/package_hwaoi_compiler.py`, or run the tools from source (see below).
+2. **Open Hyrule Warriors AOI Recomp Optimized Compiler.exe.** Select your own matching game **NUP** (and optionally an update or DLC NUP), choose an output folder, then click **Compile / update**.
+3. **Click Open compiled game** when the build finishes.
 
-After compilation, use **Open compiled game**. Keep the NUP and output folder at their original locations. Allow at least **20 GiB of free output space**; an AVX2 CPU, Vulkan GPU and sufficient memory are required (32 GiB RAM recommended). The compiler accepts only the exact build below; encrypted XCI/NSP files and other versions are unsupported. The resulting local game files are not for redistribution.
+Requirements and limits:
 
-Compiler v0.1.0-alpha.5 also accepts a complete game stored as a `standalone_update` without a `base` record. It verifies both the exact executable modules and the complete resource inventory before extraction. Partial update dumps still need the matching base. NUPs that also contain merged DLC/addon packages are accepted: the verified base + update is compiled as before, and each DLC is installed under `work/game/aoc/<index>` for the game's add-on content mounts (see [DLC support](docs/hwaoi/dlc.md)). DLC dumped separately can be added with `tools/hwaoi_aoc.py from-dir`.
+- **Output space:** at least **20 GiB free**.
+- **Hardware:** an AVX2 CPU, a Vulkan GPU and enough memory (32 GiB RAM recommended).
+- **Accepted game files:** only the exact build below. Encrypted XCI/NSP files and other versions are unsupported.
+- **After compiling:** keep the game NUP where it is. Update and DLC files are copied into the output.
+- **Updating an existing output folder:** verified game data, generated C and native objects are reused. Saves and settings are kept, and replaced source files are backed up under `work/backups`.
+- **Sharing:** the resulting local game files are not for redistribution.
 
-The compiler window also has two optional fields. **Update file** takes the game's update as its own NUP when the game file holds only the base game; the base and update are verified together as one game and the update's files are copied into the output, so only the game file must stay in place afterwards. **DLC file** takes a NUP holding the game's DLC. Leave both blank when the game file already includes the update or DLC. The v0.1.0-alpha.1 compiler can report `no base package` for this layout.
+Only the exact build recorded in [the HWAoI game profile](config/games/hwaoi-update-196608.json) is accepted (title `04003F40232DE000`, NCM 196608 = version 1.0.3). The tools check the title and module hashes before selecting game-specific patches, and never modify the original game package.
 
-Current source builds support updating or resuming an existing compiler-owned output folder. Verified resource caches, unchanged generated C and native objects are reused; saves and settings are retained, and replaced source files are backed up under `work/backups`. **Build jobs = 0** chooses generation and compilation concurrency from available RAM and system commit, with large C files limited to one concurrent compile. Compilation optimization levels are unchanged.
-
-Source builds remain available. The inherited upstream installers and release scripts are not HWAoI-ready; this fork uses its own compiler frontend.
-
-Only the exact build recorded in [the HWAoI game profile](config/games/hwaoi-update-196608.json) is accepted. The tools check the title and module hashes before selecting game-specific patches, and leave the original game package unchanged.
-
-Start with the fork's entry point:
+From source, start with the fork's entry point:
 
 ```text
 python tools/hwaoi.py --help
 python tools/hwaoi.py verify
 ```
 
-Resource preparation, C generation, compilation/linking and launching are separate steps. The `prepare-romfs`, `generate`, `build` and `launch` subcommands describe their required inputs.
+Resource preparation, C generation, compilation/linking and launching are separate steps (`prepare-romfs`, `generate`, `build`, `launch`). The frame-rate profile is generated with `generate --rate-unlock` and enabled at launch by `HWAOI_RATE_UNLOCK=1`. `HWAOI_RATE_DIAG=1` logs scheduler-step totals against wall time.
 
-The experimental native frame-rate profile is generated with:
-
-```text
-python tools/hwaoi.py generate --rate-unlock --out work/generated/hwaoi196608-full --limit 0 --jobs 2
-```
-
-After building that generation, `HWAOI_RATE_UNLOCK=1` enables the candidate. It remains off by default while gameplay timing is being tested. The frame-rate target can then be selected in the host settings. Older generations without the matching step profile must be regenerated. `HWAOI_RATE_DIAG=1` optionally logs scheduler-step totals against wall time without altering the clock.
-
-Press **Esc** for host settings, **F10** to cycle the performance overlay, and **F11** for fullscreen. Resolution changes require a restart. Actual FPS depends on the scene, hardware and selected resolution.
-
-### Higher frame rates
-
-The game's logic is locked to 60 updates per second. Diagnostics on build 196608 found:
-
-- Doubling the scheduler step, or the "speed scale" in the time block it writes (`main+0x6c2c10`, offset `+0x1290`), leaves walking speed unchanged at 60 FPS.
-- The vsync event is a fixed 60 Hz real-time signal, so vsync counting does not cause it either.
-
-Each update moves the game a fixed amount, so true 90/120 FPS would need every per-update system rescaled.
-
-For smoother motion, keep the target at **60 FPS** and add an external frame-generation tool, such as Lossless Scaling's LSFG 2×. The game's fullscreen mode (F11) is borderless rather than exclusive, so these tools can capture it. Gameplay speed stays correct because the game still runs 60 updates per second.
+In game, press **Esc** for settings, **F10** to cycle the performance overlay and **F11** for fullscreen. Resolution changes need a restart.
 
 ## Testing and reports
 
-Validation includes module/hash refusal checks, independent instruction/semantic tests and Vulkan pixel-readback probes. Generation and a successful build alone do not establish playthrough coverage.
+Validation includes:
 
-For a useful [issue report](https://github.com/Alano6678/hwaoi-recomp/issues), include the commit, GPU/CPU, resolution, frame-rate mode, where the problem occurs and the runtime log. Please keep game files and keys out of reports.
+- module/hash refusal checks
+- instruction and semantic tests
+- Vulkan pixel-readback probes
+- native tests for DLC mounts, quad batching and barrier elision
 
-## Credits and license
+A successful generation and build alone do not prove playthrough coverage.
 
-Based on [DKB Recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp), with its revision pinned in [config/upstream.json](config/upstream.json). Menu adaptations also credit [Savage Wind Recomp](https://github.com/Revivedx/SavageWindRecomp); the full inherited attributions remain in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+For an [issue report](https://github.com/LibertyPrime27/hwaoi-recomp/issues), include:
 
-GPL-3.0-or-later overall, with inherited MIT and other third-party terms preserved. See [LICENSE](LICENSE) and [LICENSE-MIT](LICENSE-MIT).
+- the commit
+- your GPU and CPU
+- the resolution and frame-rate setting
+- where the problem happens
+- the runtime log
+
+Keep game files and keys out of reports.
+
+## License
+
+GPL-3.0-or-later overall, with inherited MIT and other third-party terms preserved. See [LICENSE](LICENSE), [LICENSE-MIT](LICENSE-MIT) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

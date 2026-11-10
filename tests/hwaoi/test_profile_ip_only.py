@@ -35,6 +35,7 @@ static const char *cfg_get(const char *name) {
     if(!strcmp(name,"TOTK_PROFILE_CHAINS")) return opt_chains;
     if(!strcmp(name,"TOTK_PROFILE_IP_ONLY")) return opt_ip;
     if(!strcmp(name,"TOTK_PROFILE_FRAMES")) return opt_frames;
+    if(!strcmp(name,"TOTK_PROFILE_BUSY")) return NULL;   // busy-thread filter off: every selected thread is sampled
     CHECK(0);return NULL;
 }
 static void rt_log(const char *format,...) { (void)format; }
