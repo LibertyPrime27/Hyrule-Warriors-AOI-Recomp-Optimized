@@ -55,6 +55,10 @@ static int nfw;
 static uint64_t readback_calls, readback_bytes, readback_ns, readback_max_ns, readback_16, automatic_parts;
 // Full barriers recorded (each drains the GPU and ends a render pass) and the guest's own OP_BARRIER among them.
 static uint64_t barriers_recorded, guest_barriers;
+// The guest's NVNbarrierBits masks (the 8 defined bits) and the guest barriers with no draw, dispatch or other
+// recorded GPU work since the previous guest barrier of the replay.
+static uint64_t barrier_masks[256], barriers_idle;
+static uint64_t barrier_last_recorded = UINT64_MAX;
 static int readback_diagnostics_on(void) {
     static int enabled = -1;
     int value = __atomic_load_n(&enabled, __ATOMIC_ACQUIRE);
@@ -95,11 +99,25 @@ static void readback_diagnostics_frame(uint64_t frame) {
                 break;
             }
     }
-    rt_log("gpu-drains: frame=%llu window=60 barriers=%llu guest_barriers=%llu ub_updates=%llu "
-           "quad_batch_stops=%s:%llu,%s:%llu,%s:%llu", (unsigned long long)frame, (unsigned long long)barriers,
-           (unsigned long long)guest, (unsigned long long)ub_updates, nvn_op_name(top[0]),
-           (unsigned long long)stop[top[0]], nvn_op_name(top[1]), (unsigned long long)stop[top[1]],
-           nvn_op_name(top[2]), (unsigned long long)stop[top[2]]);
+    uint64_t masks[256];
+    uint32_t mtop[4] = {0, 0, 0, 0};
+    for (uint32_t m = 0; m < 256; m++) {
+        masks[m] = __atomic_exchange_n(&barrier_masks[m], 0, __ATOMIC_RELAXED);
+        for (int k = 0; k < 4; k++)
+            if (masks[m] > masks[mtop[k]]) {
+                for (int j = 3; j > k; j--) mtop[j] = mtop[j - 1];
+                mtop[k] = m;
+                break;
+            }
+    }
+    uint64_t idle = __atomic_exchange_n(&barriers_idle, 0, __ATOMIC_RELAXED);
+    rt_log("gpu-drains: frame=%llu window=60 barriers=%llu guest_barriers=%llu guest_idle=%llu ub_updates=%llu "
+           "guest_masks=%#x:%llu,%#x:%llu,%#x:%llu,%#x:%llu quad_batch_stops=%s:%llu,%s:%llu,%s:%llu",
+           (unsigned long long)frame, (unsigned long long)barriers, (unsigned long long)guest,
+           (unsigned long long)idle, (unsigned long long)ub_updates, mtop[0], (unsigned long long)masks[mtop[0]],
+           mtop[1], (unsigned long long)masks[mtop[1]], mtop[2], (unsigned long long)masks[mtop[2]], mtop[3],
+           (unsigned long long)masks[mtop[3]], nvn_op_name(top[0]), (unsigned long long)stop[top[0]],
+           nvn_op_name(top[1]), (unsigned long long)stop[top[1]], nvn_op_name(top[2]), (unsigned long long)stop[top[2]]);
     rt_log("gpu-readback: frame=%llu window=60 calls=%llu bytes=%llu cpu_ms=%.3f max_ms=%.3f "
            "sixteen_byte_reads=%llu automatic_parts=%llu indirect_batches=%llu quads_gpu=%llu quads_cpu=%llu "
            "quad_conversion_batches=%llu quad_draws_converted=%llu", (unsigned long long)frame,
@@ -1012,8 +1030,13 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         case OP_SET_TEX_POOL: ex->tex_pool = ((const p_set_pool *)a)->pool, ex->tex_serial++; break;
         case OP_SET_SAMP_POOL: ex->samp_pool = ((const p_set_pool *)a)->pool, ex->tex_serial++; break;
         case OP_BARRIER:
-            if (readback_diagnostics_on()) __atomic_fetch_add(&guest_barriers, 1, __ATOMIC_RELAXED);
+            if (readback_diagnostics_on()) {
+                __atomic_fetch_add(&guest_barriers, 1, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&barrier_masks[((const p_barrier *)a)->bits & 0xff], 1, __ATOMIC_RELAXED);
+                if (ex->recorded == barrier_last_recorded) __atomic_fetch_add(&barriers_idle, 1, __ATOMIC_RELAXED);
+            }
             vk_exec_barrier(ex);
+            barrier_last_recorded = ex->recorded;
             break;
         case OP_WAIT_SYNC: break;   // submit preparation waited before any replay/snapshot; source may be gone
         case OP_FENCE_SYNC: break;  // represented by the whole-submit frontier, published by the front end
