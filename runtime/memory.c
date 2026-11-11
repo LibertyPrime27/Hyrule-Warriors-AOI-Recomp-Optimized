@@ -55,6 +55,10 @@ static RtGuestLayout L;
 static uint64_t mods_lo, mods_hi;   // fixed module window
 static PlatMutex lock = PLAT_MUTEX_INIT;
 static uint64_t heap_size, alias_bytes;
+static uint64_t heap_live;
+static int lazy_heap;
+static uint64_t lazy_granule;
+static volatile uint64_t *heap_backed; // one bit per 4 KiB page; allocated only in demand mode
 static uint8_t *alias_pages;        // 1 per mapped 4 KiB page of the alias region
 typedef struct { uint64_t dst, src, size; } StackMap;
 static StackMap stack_maps[MAX_STACK_MAPS];
@@ -110,7 +114,91 @@ static void thaw_range_locked(uint64_t a, uint64_t n, int why) {
     for (uint64_t r = r0; r <= r1; r++) thaw_locked(r, why);
 }
 
+static uint64_t page_mask(uint64_t word, uint64_t first, uint64_t last) {
+    unsigned lo = word == first / 64 ? (unsigned)(first & 63) : 0;
+    unsigned hi = word == last / 64 ? (unsigned)(last & 63) : 63;
+    return (UINT64_MAX << lo) & (UINT64_MAX >> (63 - hi));
+}
+
+static void heap_backing_mark(uint64_t a, uint64_t n, int backed) {
+    if (!lazy_heap || !n || a > UINT64_MAX - n || a >= L.heap.base + L.heap.size || a + n <= L.heap.base) return;
+    uint64_t lo = a < L.heap.base ? L.heap.base : a;
+    uint64_t hi = a + n > L.heap.base + L.heap.size ? L.heap.base + L.heap.size : a + n;
+    uint64_t first = (lo - L.heap.base) / PAGE, last = (hi - 1 - L.heap.base) / PAGE;
+    for (uint64_t word = first / 64; word <= last / 64; word++) {
+        uint64_t mask = page_mask(word, first, last);
+        if (backed) __atomic_fetch_or(&heap_backed[word], mask, __ATOMIC_RELEASE);
+        else __atomic_fetch_and(&heap_backed[word], ~mask, __ATOMIC_RELEASE);
+    }
+}
+
+static int heap_already_backed(uint64_t a, uint64_t n) {
+    uint64_t first = (a - L.heap.base) / PAGE, last = (a - L.heap.base + n - 1) / PAGE;
+    for (uint64_t word = first / 64; word <= last / 64; word++) {
+        uint64_t mask = page_mask(word, first, last);
+        if ((__atomic_load_n(&heap_backed[word], __ATOMIC_ACQUIRE) & mask) != mask) return 0;
+    }
+    return 1;
+}
+
+// frz_lock held: committing never changes an already committed page's guard.
+static int prepare_heap_locked(uint64_t a, uint64_t n, int *oom) {
+    if (!lazy_heap || !n) return 1;
+    if (a > UINT64_MAX - n) return 0;
+    if (a >= L.heap.base + L.heap.size || a + n <= L.heap.base) return 1;
+    uint64_t live = __atomic_load_n(&heap_live, __ATOMIC_ACQUIRE);
+    if (a < L.heap.base || n > live || a - L.heap.base > live - n) return 0;
+    uint64_t end = align_up(a + n, PAGE);
+    for (uint64_t at = a & ~(PAGE - 1); at < end;) {
+        uint64_t next;
+        int state = plat_mem_state(at, end, &next);
+        if (next <= at || state == PLAT_MEM_FREE) return 0;
+        if (state == PLAT_MEM_RESERVED) {
+            thaw_range_locked(at, next - at, 3);
+            if (!plat_mem_commit(at, next - at)) { *oom = 1; return 0; }
+        }
+        heap_backing_mark(at, next - at, 1);
+        at = next;
+    }
+    return 1;
+}
+
+int mem_prepare_range(uint64_t a, uint64_t n) {
+    if (!lazy_heap || !n) return 1;
+    if (a > UINT64_MAX - n) return 0;
+    if (a >= L.heap.base + L.heap.size || a + n <= L.heap.base) return 1;
+    uint64_t live = __atomic_load_n(&heap_live, __ATOMIC_ACQUIRE);
+    if (a < L.heap.base || n > live || a - L.heap.base > live - n) return 0;
+    // Descriptor/control reads repeatedly touch the same pages. Avoid another
+    // VirtualQuery and the freeze lock once backing is known; host APIs still
+    // enforce page permissions, including moved-stack and frozen-page guards.
+    if (heap_already_backed(a, n)) return 1;
+    int oom = 0;
+    plat_mutex_lock(&frz_lock);
+    int ok = prepare_heap_locked(a, n, &oom);
+    plat_mutex_unlock(&frz_lock);
+    if (oom) rt_fatal("memory: demand commit %#llx+%#llx failed", (unsigned long long)a, (unsigned long long)n);
+    return ok;
+}
+
+#ifdef _WIN32
+static void forget_heap_backing(uint64_t a, uint64_t n) { heap_backing_mark(a, n, 0); }
+static int demand_heap_fault(uint64_t a) {
+    uint64_t live = __atomic_load_n(&heap_live, __ATOMIC_ACQUIRE), end;
+    if (!lazy_heap || a < L.heap.base || a - L.heap.base >= live ||
+        plat_mem_state(a & ~(PAGE - 1), (a & ~(PAGE - 1)) + PAGE, &end) != PLAT_MEM_RESERVED) return 0;
+    heap_backing_mark(a & ~(PAGE - 1), PAGE, 0);
+    uint64_t lo = a & ~(lazy_granule - 1), hi = lo + lazy_granule;
+    if (lo < L.heap.base) lo = L.heap.base;
+    if (hi > L.heap.base + live) hi = L.heap.base + live;
+    return mem_prepare_range(lo, hi - lo) &&
+           plat_mem_state(a & ~(PAGE - 1), (a & ~(PAGE - 1)) + PAGE, &end) == PLAT_PROT_RW;
+}
+
+#endif
+
 void mem_thaw(uint64_t a, uint64_t n) {
+    if (!mem_prepare_range(a, n)) return;
     plat_mutex_lock(&frz_lock);   // also when nothing is frozen: the hold keeps a read's buffer writable
     thaw_range_locked(a, n, 2);
     plat_mutex_unlock(&frz_lock);
@@ -196,7 +284,8 @@ static void decommit(uint64_t a, uint64_t n, const char *what) {
 static void protect(uint64_t a, uint64_t n, int prot, const char *what) {
     plat_mutex_lock(&frz_lock);
     thaw_range_locked(a, n, 3);
-    int ok = !n || plat_mem_protect(a, n, prot);
+    int oom = 0;
+    int ok = prepare_heap_locked(a, n, &oom) && (!n || plat_mem_protect(a, n, prot));
     plat_mutex_unlock(&frz_lock);
     if (!ok) rt_fatal("memory: protect %s %#llx+%#llx failed", what, (unsigned long long)a, (unsigned long long)n);
 }
@@ -250,6 +339,22 @@ void mem_init(void) {
         .pool = pool ? strtoull(pool, NULL, 0) : DEFAULT_POOL + res_heap_extra_bytes(),   // resolution.c
     };
     if (!L.pool) rt_fatal("memory: TOTK_APP_POOL is 0");
+    lazy_heap = cfg_bool("TOTK_LAZY_HEAP");
+    if (lazy_heap) {
+#ifdef _WIN32
+        const char *granule = cfg_value("TOTK_LAZY_HEAP_KIB");
+        if (strcmp(granule, "64") && strcmp(granule, "256") && strcmp(granule, "2048"))
+            rt_fatal("memory: LAZY_HEAP_KIB must be 64, 256 or 2048");
+        lazy_granule = strtoull(granule, NULL, 10) << 10;
+        heap_backed = calloc(HEAP_CAP / PAGE / 64, sizeof *heap_backed);
+        if (!heap_backed) rt_fatal("memory: demand-heap backing bitmap allocation failed");
+        plat_mem_demand_hooks(demand_heap_fault, mem_prepare_range, forget_heap_backing);
+        rt_log("memory: EXPERIMENTAL demand-commit heap (%llu KiB faults); guest capacity unchanged, GPU imports prepared eagerly",
+               (unsigned long long)(lazy_granule >> 10));
+#else
+        rt_fatal("memory: LAZY_HEAP is currently Windows-only");
+#endif
+    }
 }
 
 const RtGuestLayout *mem_layout(void) { return &L; }
@@ -285,9 +390,13 @@ uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr) {
         plat_mutex_unlock(&lock);
         return R_INVALID_STATE;
     }
-    if (size > heap_size) commit(L.heap.base + heap_size, size - heap_size, "heap");
-    if (size < heap_size) decommit(L.heap.base + size, heap_size - size, "heap");
+    if (size > heap_size && !lazy_heap) commit(L.heap.base + heap_size, size - heap_size, "heap");
+    if (size < heap_size) {
+        __atomic_store_n(&heap_live, size, __ATOMIC_RELEASE);
+        decommit(L.heap.base + size, heap_size - size, "heap");
+    }
     heap_size = size;
+    __atomic_store_n(&heap_live, size, __ATOMIC_RELEASE);
     plat_mutex_unlock(&lock);
     if (addr) *addr = L.heap.base;
     return R_OK;

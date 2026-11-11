@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -11,6 +12,7 @@
 #include <unistd.h>
 #endif
 #include "nvn_api.h"
+#include "nvn_reclaim.h"
 #include "platform/platform.h"
 
 // Use the actual null replay to check that queued waits never dereference their submit-time source.
@@ -52,6 +54,15 @@ void nvn_mode_trace(unsigned kind, uint64_t cb, uint64_t handle, uint32_t value,
     (void)kind; (void)cb; (void)handle; (void)value; (void)submit;
 }
 void rt_log(const char *fmt, ...) { (void)fmt; }
+uint64_t plat_now_ns(void) {
+#ifdef _WIN32
+    return GetTickCount64()*1000000ull;
+#else
+    struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000000000ull+t.tv_nsec;
+#endif
+}
+int nvn_reclaim_submit(void *p,uint64_t n,uint64_t b,void(*fn)(void*)){(void)p;(void)n;(void)b;(void)fn;return 0;}
+void nvn_reclaim_stats(NvnReclaimStats *out){memset(out,0,sizeof *out);}
 // This recorder fixture has no guest stack for optional call-site diagnostics.
 int plat_mem_readable(uint64_t address, uint64_t size) { (void)address; (void)size; return 0; }
 void rt_fatal(const char *fmt, ...) {

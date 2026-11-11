@@ -32,6 +32,7 @@ def stage_source():
 #include <stdlib.h>
 #include <string.h>
 #include "gfx.h"
+const uint8_t *nvn_program_source(const uint8_t *p) {return p;}
 #define NVN_PROG_MAGIC MAGIC('P','R','O','G')
 #define CHECK(x) do { if(!(x)) { fprintf(stderr,"check line %d: %s\n",__LINE__,#x);exit(1); } } while(0)
 static uint8_t raw_ctl[6][0xd8],raw_code[6][0xa0],legacy[6][0x880],lower_code[6][0x100];

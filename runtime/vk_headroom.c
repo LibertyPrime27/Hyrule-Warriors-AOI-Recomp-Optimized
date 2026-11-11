@@ -55,14 +55,20 @@ const VmaDeviceMemoryCallbacks *vk_headroom_callbacks(void) {
 
 static VkDeviceSize block_size(const VkCtx *c, uint32_t type) {
     VkDeviceSize heap = c->mem_props.memoryHeaps[c->mem_props.memoryTypes[type].heapIndex].size;
-    return heap <= HR_SMALL_HEAP ? heap / 8 : 256ull << 20;   // VMA's default preferredLargeHeapBlockSize
+    if (heap <= HR_SMALL_HEAP) return heap / 8;
+    return c->vma_block_size ? c->vma_block_size : 256ull << 20;
 }
 
 static int room(const VkCtx *c, uint32_t type, VkDeviceSize block) {
     VmaBudget b[VK_MAX_MEMORY_HEAPS];
     vmaGetHeapBudgets(c->vma, b);
     const VmaBudget *h = &b[c->mem_props.memoryTypes[type].heapIndex];
-    return h->budget && h->usage + 2 * block <= h->budget / 100 * 85;
+    // Smaller allocator blocks must not loosen the previous VRAM-pressure
+    // margin and start retaining spare device blocks close to the budget.
+    VkDeviceSize reserve = block;
+    if (c->mem_props.memoryHeaps[c->mem_props.memoryTypes[type].heapIndex].size > HR_SMALL_HEAP && reserve < (256ull << 20))
+        reserve = 256ull << 20;
+    return h->budget && h->usage + 2 * reserve <= h->budget / 100 * 85;
 }
 
 static void drop_anchor(const VkCtx *c, uint32_t type) {

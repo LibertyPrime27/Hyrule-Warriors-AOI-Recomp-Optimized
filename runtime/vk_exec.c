@@ -1016,7 +1016,9 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
     for (;;) {
         if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_)
             rt_fatal("vk: corrupt command record at %p: op %u size %u", (const void *)h, h->op, h->size);
-        const void *a = nvn_op_payload(h);
+        NvnOpScratch normalized;
+        const void *a = nvn_op_normalize(h, &normalized);
+        if (!a) rt_fatal("vk: invalid packed command record op %u size %u", h->op, h->size);
         switch (h->op) {
         case OP_END: return;
         case OP_BEGIN: break;

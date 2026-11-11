@@ -278,8 +278,9 @@ static DWORD WINAPI sampler_main(void *arg) {
             ResumeThread(t->h);
             if (only_busy && !slow_ns) QueryThreadCycleTime(t->h, &t->cycles);   // the sample's own cost is not running
             if (!ok) continue;
-            count_rip(ctx.Rip);
-            uint64_t chain[PROF_DEPTH] = {ctx.Rip};
+            uint64_t sampled_rip = ctx.Rip;   // unwinding below advances ctx into its callers
+            count_rip(sampled_rip);
+            uint64_t chain[PROF_DEPTH] = {sampled_rip};
             uint32_t d = n ? unwind_copy(&ctx, ctx.Rsp, n, chain) : 0;
             if (d) count_stack(chain, d);
             if (slow_ns) {
@@ -299,7 +300,7 @@ static DWORD WINAPI sampler_main(void *arg) {
             }
             total++;
             t->n++;
-            if (ctx.Rip >= exe_lo && ctx.Rip < exe_hi) t->in_exe++;
+            if (sampled_rip >= exe_lo && sampled_rip < exe_hi) t->in_exe++;
         }
     }
     return 0;
@@ -390,8 +391,15 @@ int prof_sampler_start(void) {
 
 // perf_present, every present: the frame the sampler's TOTK_PROFILE_FRAMES window counts, and a TOTK_PROFILE_SLOW
 // dump of a present at least slow_ns after the previous one (d 0 on the first present).
+// A bounded window writes once at its end, so a live session need not exit just
+// to inspect a short profile. The boundary flush is outside the sampled window.
 void prof_sampler_frame(uint64_t frame, uint64_t now, uint64_t d) {
     cur_frame = frame;
+    if (out_path && !written && ((frame_hi && frame >= frame_hi) ||
+                                (world_hi && frame_step_world_us() >= world_hi))) {
+        prof_sampler_write();
+        return;
+    }
     if (slow_ns && d >= slow_ns && !dump_hi && in_window()) {
         dump_lo = (LONG64)(now - d - 20000000ull);
         dump_frame = (LONG64)frame;

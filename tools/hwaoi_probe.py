@@ -39,7 +39,7 @@ def summarize_runtime_diagnostics(log):
     growth = {}
     if samples > 1 and monotonic:
         frames = last["frame"] - first["frame"]
-        for key in ("copy_bytes", "zombie_bytes", "texture_pin_bytes", "program_control_bytes"):
+        for key in ("copy_bytes", "zombie_bytes", "texture_pin_bytes", "program_control_bytes", "reclaim_bytes", "record_bytes"):
             if key not in first or key not in last:
                 continue
             if key == "program_control_bytes" and re.search(r"program_ledger_partial=[1-9]", log):

@@ -128,10 +128,13 @@ const char *nvn_op_name(uint32_t op);                      // "DRAW_IDX", ...; "
 typedef struct {
     uint64_t copies, copy_bytes, copies_made, copy_index_bytes;
     uint64_t zombies, zombie_bytes;
+    uint64_t reclaim_copies, reclaim_bytes, reclaim_peak_bytes;
+    uint64_t record_buffers, record_bytes, record_peak_bytes, record_reinits;
     uint64_t texture_pins, texture_pin_bytes, texture_pin_index_bytes;
     uint64_t program_controls, program_control_bytes, program_controls_made, program_control_bytes_made;
     uint64_t program_control_index_bytes;
     uint64_t program_ledger_disabled, program_unmatched_frees, program_duplicate_allocations;
+    uint64_t program_source_blocks, program_source_original_bytes, program_source_bytes, program_source_index_bytes;
 } NvnMemoryStats;
 int nvn_memory_diagnostics(void);                         // RUNTIME_MEMORY_DIAG=1; read once, off by default
 void nvn_runtime_memory_stats(NvnMemoryStats *out);       // no allocation, no collection/reclamation side effects

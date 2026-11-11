@@ -34,6 +34,8 @@ def source():
 #include <string.h>
 #include <windows.h>
 #include "nvn_api.h"
+#include "nvn_reclaim.h"
+#include "nvn_program_source.h"
 #include "nvn_hmap.h"
 #include "platform/platform.h"
 #define CHECK(x) do {if(!(x)){fprintf(stderr,"line %d: %s\n",__LINE__,#x);exit(1);}}while(0)
@@ -45,17 +47,23 @@ def source():
 static const char *setting;
 static unsigned config_reads, ledger_warnings, fail_index;
 static uint64_t replayed;
+void nvn_program_source_stats(NvnProgramSourceStats *out){memset(out,0,sizeof *out);}
+// The command-recorder allocation functions are exercised by control_memory_fixture.c.
+static uint64_t record_buffers, record_bytes, record_peak_bytes, record_reinits;
 const char *cfg_get(const char *key) {
  CHECK(!strcmp(key,"TOTK_RUNTIME_MEMORY_DIAG"));
  __atomic_fetch_add(&config_reads,1,__ATOMIC_RELAXED);return setting;
 }
 void rt_log(const char *fmt,...) {CHECK(strstr(fmt,"program allocation ledger disabled"));ledger_warnings++;}
+uint64_t plat_now_ns(void) {return GetTickCount64()*1000000ull;}
 void rt_fatal(const char *fmt,...) {va_list ap;va_start(ap,fmt);vfprintf(stderr,fmt,ap);va_end(ap);exit(73);}
 void plat_mutex_lock(PlatMutex *p) {AcquireSRWLockExclusive((PSRWLOCK)p);}
 void plat_mutex_unlock(PlatMutex *p) {ReleaseSRWLockExclusive((PSRWLOCK)p);}
 void plat_mutex_lock_shared(PlatMutex *p) {AcquireSRWLockShared((PSRWLOCK)p);}
 void plat_mutex_unlock_shared(PlatMutex *p) {ReleaseSRWLockShared((PSRWLOCK)p);}
 uint64_t gfx_replayed_submits(void) {return replayed;}
+int nvn_reclaim_submit(void *p,uint64_t n,uint64_t b,void(*fn)(void*)){(void)p;(void)n;(void)b;(void)fn;return 0;}
+void nvn_reclaim_stats(NvnReclaimStats *out){memset(out,0,sizeof *out);}
 ''' + enabled + copies + r'''
 // Only diagnostic index allocation can be failed. The ledger must not free or
 // mutate the shader/control allocation that belongs to the caller.

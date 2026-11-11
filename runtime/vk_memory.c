@@ -124,6 +124,11 @@ static int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
     r->import_lo = addr & ~(al - 1);
     r->import_hi = (addr + size + al - 1) & ~(al - 1);
     uint64_t n = r->import_hi - r->import_lo;
+    if (!mem_prepare_range(r->import_lo, n)) {
+        rt_log("vk: host import range %#llx+%#llx is not valid guest memory", (unsigned long long)r->import_lo,
+               (unsigned long long)n);
+        return 0;
+    }
     VkMemoryHostPointerPropertiesEXT hp = {.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
     VkResult res = p_host_props ? p_host_props(c->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                                                (void *)(uintptr_t)r->import_lo, &hp)
@@ -1883,10 +1888,14 @@ static void vram_log(uint64_t frame) {
     VmaBudget vb[VK_MAX_MEMORY_HEAPS];
     vmaGetHeapBudgets(c->vma, vb);
     uint64_t blocks = 0, block_bytes = 0, allocs = 0, alloc_bytes = 0;
+    uint64_t host_blocks = 0, host_bytes = 0, host_alloc_bytes = 0;
     for (uint32_t h = 0; h < c->mem_props.memoryHeapCount && h < VK_MAX_MEMORY_HEAPS; h++)
         if (c->mem_props.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
             blocks += vb[h].statistics.blockCount, block_bytes += vb[h].statistics.blockBytes,
                 allocs += vb[h].statistics.allocationCount, alloc_bytes += vb[h].statistics.allocationBytes;
+        else
+            host_blocks += vb[h].statistics.blockCount, host_bytes += vb[h].statistics.blockBytes,
+                host_alloc_bytes += vb[h].statistics.allocationBytes;
     VkTexCensus t;
     vk_texture_census(&t);
     const double M = 1048576.0;
@@ -1896,6 +1905,9 @@ static void vram_log(uint64_t frame) {
            alloc_bytes / M, (unsigned long long)t.live, (unsigned long long)t.own_live, t.bytes_live / M,
            (unsigned long long)t.released, (unsigned long long)t.own_released, t.bytes_released / M, (long long)m_live_n,
            m_live_bytes / M, dead_pending());
+    rt_log("mem: host frame %llu: vma %llu blocks %.0f MiB, allocated %.0f MiB, unused %.0f MiB",
+           (unsigned long long)frame, (unsigned long long)host_blocks, host_bytes / M,
+           host_alloc_bytes / M, (host_bytes - host_alloc_bytes) / M);
 }
 
 // Device class: INTEGRATED -> uma; a discrete GPU with a DEVICE_LOCAL heap of 1 GiB or more beside a
@@ -2150,18 +2162,21 @@ void *vk_staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc) {
         plat_rmutex_lock(&cmd_lock);
         if (!stg_pool_tried) {
             uint32_t type;
-            VmaPoolCreateInfo pi = {.blockSize = STG_BLOCK, .minBlockCount = STG_MIN_BLOCKS};
+            int compact = c->vma_block_size && c->vma_block_size <= (128ull << 20);
+            VmaPoolCreateInfo pi = {.blockSize = compact ? (32ull << 20) : STG_BLOCK,
+                                    .minBlockCount = compact ? 1 : STG_MIN_BLOCKS};
             if (vmaFindMemoryTypeIndexForBufferInfo(c->vma, &bi, &aci, &type) == VK_SUCCESS) {
                 pi.memoryTypeIndex = type;
                 if (vmaCreatePool(c->vma, &pi, &stg_pool) != VK_SUCCESS) stg_pool = NULL;
             }
-            rt_log("vk: staging pool %s (%d blocks of %llu MiB kept)", stg_pool ? "created" : "unavailable: default pool",
-                   STG_MIN_BLOCKS, (unsigned long long)(STG_BLOCK >> 20));
+            rt_log("vk: staging pool %s (%u blocks of %llu MiB kept)", stg_pool ? "created" : "unavailable: default pool",
+                   (unsigned)pi.minBlockCount, (unsigned long long)(pi.blockSize >> 20));
             __atomic_store_n(&stg_pool_tried, 1, __ATOMIC_RELEASE);
         }
         plat_rmutex_unlock(&cmd_lock);
     }
-    if (stg_pool && bi.size <= STG_BLOCK / 2) aci.pool = stg_pool;
+    VkDeviceSize block = c->vma_block_size && c->vma_block_size <= (128ull << 20) ? (32ull << 20) : STG_BLOCK;
+    if (stg_pool && bi.size <= block / 2) aci.pool = stg_pool;
     VmaAllocationInfo info;
     VkBuffer b;
     VmaAllocation a;

@@ -18,6 +18,13 @@
 
 #include "platform.h"
 
+static int (*demand_fault)(uint64_t addr);
+static int (*demand_prepare)(uint64_t addr, uint64_t size);
+static void (*demand_forget)(uint64_t addr, uint64_t size);
+static int host_buffer_ready(const void *buffer, uint64_t bytes) {
+    return !demand_prepare || demand_prepare((uintptr_t)buffer, bytes);
+}
+
 _Static_assert(sizeof(PlatMutex) == sizeof(SRWLOCK), "PlatMutex holds an SRWLOCK");
 _Static_assert(sizeof(PlatCond) == sizeof(CONDITION_VARIABLE), "PlatCond holds a CONDITION_VARIABLE");
 
@@ -388,6 +395,7 @@ uint8_t *plat_file_read(const char *path, uint64_t *size) {
 }
 
 int plat_file_write(const char *path, const void *data, size_t n) {
+    if (!host_buffer_ready(data, n)) return 0;
     wchar_t w[WPATH];
     if (!widen(path, w, WPATH)) return 0;
     HANDLE h = CreateFileW(w, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -407,6 +415,7 @@ PlatAppend *plat_append_open(const char *path) {
 }
 
 int plat_append_write(PlatAppend *f, const void *data, size_t n) {
+    if (!host_buffer_ready(data, n)) return 0;
     // Offset and OffsetHigh all ones: WriteFile appends at the end of the file, atomically against other writers.
     OVERLAPPED o = {.Offset = 0xffffffff, .OffsetHigh = 0xffffffff};
     DWORD put = 0;
@@ -420,6 +429,7 @@ int plat_file_replace(const char *from, const char *to) {
 }
 
 int plat_file_write_atomic(const char *path, const void *data, size_t n) {
+    if (!host_buffer_ready(data, n)) return 0;
     char tmp[WPATH + 48];
     wchar_t a[WPATH], b[WPATH];
     int len = snprintf(tmp, sizeof tmp, "%s.%u.%u.tmp", path, (unsigned)GetCurrentProcessId(), (unsigned)GetCurrentThreadId());
@@ -511,7 +521,11 @@ int plat_mem_commit(uint64_t addr, size_t n) {
 }
 
 // Decommitted pages come back zeroed when committed again.
-int plat_mem_decommit(uint64_t addr, uint64_t n) { return VirtualFree((void *)(uintptr_t)addr, n, MEM_DECOMMIT) != 0; }
+int plat_mem_decommit(uint64_t addr, uint64_t n) {
+    int ok = VirtualFree((void *)(uintptr_t)addr, n, MEM_DECOMMIT) != 0;
+    if (ok && demand_forget) demand_forget(addr, n);
+    return ok;
+}
 
 int plat_mem_protect(uint64_t addr, uint64_t n, int prot) {
     DWORD old;
@@ -548,12 +562,21 @@ uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t m
 
 static int (*fault_hook)(uint64_t addr);
 
+void plat_mem_demand_hooks(int (*fault)(uint64_t), int (*prepare)(uint64_t, uint64_t), void (*forget)(uint64_t, uint64_t)) {
+    demand_fault = fault;
+    demand_prepare = prepare;
+    demand_forget = forget;
+}
+
 // A write access violation (ExceptionInformation[0] == 1) goes to the hook; registered first, before the crash handler.
 static LONG CALLBACK fault_veh(EXCEPTION_POINTERS *ep) {
     const EXCEPTION_RECORD *er = ep->ExceptionRecord;
-    if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2 || er->ExceptionInformation[0] != 1)
+    if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2 || er->ExceptionInformation[0] > 1)
         return EXCEPTION_CONTINUE_SEARCH;
-    return fault_hook((uint64_t)er->ExceptionInformation[1]) ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+    uint64_t address = (uint64_t)er->ExceptionInformation[1];
+    if (demand_fault && demand_fault(address)) return EXCEPTION_CONTINUE_EXECUTION;
+    return er->ExceptionInformation[0] == 1 && fault_hook && fault_hook(address)
+        ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
 }
 
 void plat_mem_fault_hook(int (*fn)(uint64_t addr)) {
@@ -637,11 +660,13 @@ void plat_reexec(void) {
 }
 
 int plat_mem_read(uint64_t addr, void *out, size_t n) {
+    if (demand_prepare && (!demand_prepare(addr, n) || !demand_prepare((uintptr_t)out, n))) return 0;
     SIZE_T got = 0;
     return ReadProcessMemory(GetCurrentProcess(), (const void *)(uintptr_t)addr, out, n, &got) && got == n;
 }
 
 int plat_mem_readable(uint64_t addr, uint64_t n) {
+    if (demand_prepare && !demand_prepare(addr, n)) return 0;
     for (uint64_t a = addr, end = addr + n; a < end || a == addr;) {
         MEMORY_BASIC_INFORMATION mbi;
         if (!VirtualQuery((void *)(uintptr_t)a, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT) return 0;
@@ -773,6 +798,7 @@ void plat_file_close(PlatFile *f) {
 }
 
 int64_t plat_file_pread(PlatFile *f, void *buf, uint32_t n, uint64_t off) {
+    if (!host_buffer_ready(buf, n)) return -2;
     static __thread HANDLE ev;
     if (!ev && !(ev = CreateEventW(NULL, TRUE, FALSE, NULL))) return -1;
     OVERLAPPED ov = {.Offset = (DWORD)off, .OffsetHigh = (DWORD)(off >> 32), .hEvent = ev};
@@ -1016,6 +1042,7 @@ PlatFile *plat_fs_open(const char *path, int write, int *err) {
 PlatFile *plat_fs_create(const char *path, int *err) { return fs_open(path, GENERIC_WRITE, 0, CREATE_NEW, err); }
 
 int64_t plat_file_pwrite(PlatFile *f, const void *buf, uint32_t n, uint64_t off) {
+    if (!host_buffer_ready(buf, n)) return -1;
     static __thread HANDLE ev;
     if (!ev && !(ev = CreateEventW(NULL, TRUE, FALSE, NULL))) return -1;
     OVERLAPPED ov = {.Offset = (DWORD)off, .OffsetHigh = (DWORD)(off >> 32), .hEvent = ev};
@@ -1461,11 +1488,13 @@ void plat_child_stop(PlatChild *c) {
 }
 
 int plat_child_write(PlatChild *c, const void *data, size_t n) {
+    if (!host_buffer_ready(data, n)) return 0;
     DWORD put = 0;
     return WriteFile(c->in, data, (DWORD)n, &put, NULL) && put == n;
 }
 
 long plat_child_read(PlatChild *c, void *buf, size_t cap) {
+    if (!host_buffer_ready(buf, cap)) return -1;
     DWORD got = 0;
     if (!ReadFile(c->out, buf, (DWORD)cap, &got, NULL)) return -1;
     return (long)got;

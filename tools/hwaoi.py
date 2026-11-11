@@ -306,7 +306,7 @@ def launch_interactive(args, identity):
         options["HWAOI_SCENE_SHARPNESS"] = env["HWAOI_SCENE_SHARPNESS"] = args.scene_sharpness
     # Retain selected inherited diagnostics in the private launch report.
     for key in ("HWAOI_OUTPUT_RES", "HWAOI_SCENE_RES", "HWAOI_FPS_LIMIT", "HWAOI_EXPERIMENTAL_RATE", "HWAOI_APP_POOL", "HWAOI_VK_PRESENT", "HWAOI_DISPLAY_POOL_TEST",
-                "HWAOI_MEMORY", "HWAOI_VERTEX_CACHE", "HWAOI_AB",
+                "HWAOI_MEMORY", "HWAOI_VERTEX_CACHE", "HWAOI_AB", "HWAOI_REPLAY_ASYNC", "HWAOI_SMALL_MEMORY_POOLS", "HWAOI_COPY_RECLAIM", "HWAOI_SOURCE_COMPRESS", "HWAOI_LAZY_HEAP", "HWAOI_LAZY_HEAP_KIB",
                 "HWAOI_GPU_WRITE_DIAG", "HWAOI_GPU_READBACK_DIAG", "HWAOI_GPU_QUADS", "HWAOI_INDIRECT_BATCH", "HWAOI_UI_DRAW_DIAG", "HWAOI_RUNTIME_MEMORY_DIAG", "HWAOI_RATE_DIAG", "HWAOI_RATE_UNLOCK", "HWAOI_VK_VALIDATION",
                 "VK_LAYER_PATH", "HWAOI_DUMP", "HWAOI_DUMP_DIR", "HWAOI_DUMP_LOG", "HWAOI_DUMP_UBO", "HWAOI_DUMP_TRIGGER",
                 "HWAOI_DUMP_TEX", "HWAOI_DUMP_SKIP_RUNS", "HWAOI_DUMP_METADATA", "HWAOI_SCENE_SHARPNESS", "HWAOI_NATIVE_1080",
@@ -329,6 +329,11 @@ def launch_interactive(args, identity):
         options.pop("HWAOI_WINDOW_SIZE", None)
         for prefix in ("HWAOI_", "DKB_", "TOTK_"):
             env.pop(prefix + "WINDOW_SIZE", None)
+    if getattr(args, "capture_every", None) is not None:
+        need(args.input_feed is not None and not args.no_captures,
+             "--capture-every requires --input-feed and enabled captures")
+        need(15 <= args.capture_every <= 3600, "--capture-every must be in 15..3600 frames")
+        options["HWAOI_SHOTS"] = env["HWAOI_SHOTS"] = f"120-1000000000:{args.capture_every}"
     if args.experimental_rate_control:
         need(args.input_feed is not None, "experimental rate control requires an explicit diagnostic input feed")
         options["HWAOI_EXPERIMENTAL_RATE"] = env["HWAOI_EXPERIMENTAL_RATE"] = "1"
@@ -415,6 +420,7 @@ def build_parser():
     launch.add_argument("--exe", type=Path, default=ROOT / "work/build/hwaoi196608" / GAME_EXE)
     launch.add_argument("--zlib", type=Path, default=Path("F:/GCC/ucrt64/bin/zlib1.dll"))
     launch.add_argument("--input-feed", type=Path, help="opt-in expiring diagnostic controls under work/reports")
+    launch.add_argument("--capture-every", type=int, help="diagnostic capture stride in frames (15..3600; requires --input-feed)")
     launch.add_argument("--input", dest="input_mode", choices=("auto", "keyboard", "none"), default="auto", help="physical input policy; diagnostic scripts/feed remain available")
     launch.add_argument("--no-captures", action="store_true", help="disable automatic diagnostic screenshots for normal play")
     launch.add_argument("--scene-sharpness", type=scene_sharpness, help="experimental 3D sharpening strength 0..100, or game for original parameters (default)")

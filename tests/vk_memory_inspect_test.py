@@ -171,7 +171,7 @@ def main():
     memory = (ROOT / 'runtime/vk_memory.c').read_text()
     inspect = function(memory, 'int vk_mem_inspect(')
     pieces = [PRELUDE, statement(memory, 'enum { POOL_IMPORT'), statement(memory, 'enum { MS_NONE'),
-              typedef(memory, 'VPage'), typedef(memory, 'PoolRec'),
+              typedef(memory, 'VPage'), typedef(memory, 'MirrorFlush'), typedef(memory, 'PoolRec'),
               statement(memory, 'static PlatMutex pool_lock'), statement(memory, 'static pidx pool_index'),
               function(memory, 'static int rec_class('), inspect, FIXTURE]
     out = ROOT / 'build/tests/vk-memory-inspect'
@@ -186,18 +186,18 @@ def main():
         exe = out / ('inspect-' + opt + ('.exe' if os.name == 'nt' else ''))
         command = [args.cc, '-' + opt, '-std=gnu17', '-Wall', '-Wextra', '-Werror', '-fno-strict-aliasing',
                    '-I', str(ROOT / 'runtime'), '-I', str(include), '-I', str(include / 'vma'), str(fixture), '-o', str(exe)]
-        built = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        built = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=60)
         (out / (opt + '-compile.log')).write_text(built.stdout + built.stderr + f'exit={built.returncode}\n')
         assert built.returncode == 0, built.stdout + built.stderr
         compiler = Path(shutil.which(args.cc) or args.cc)
         objdump = compiler.with_name('llvm-objdump.exe' if os.name == 'nt' else 'llvm-objdump')
         import_check = 'unavailable; no graphics library linked'
         if objdump.is_file():
-            imports = subprocess.check_output([str(objdump), '-p', str(exe)], text=True)
+            imports = subprocess.check_output([str(objdump), '-p', str(exe)], text=True, encoding='utf-8', errors='replace')
             (out / (opt + '-imports.log')).write_text(imports)
             assert not re.search(r'(?:DLL Name:|NEEDED).*?(?:vulkan|nvoglv|amdvlk)', imports, re.I), 'unexpected GPU import'
             import_check = 'PASS: no Vulkan/driver import'
-        ran = subprocess.run([str(exe)], capture_output=True, text=True, timeout=20)
+        ran = subprocess.run([str(exe)], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=20)
         (out / (opt + '-run.log')).write_text(ran.stdout + ran.stderr + f'exit={ran.returncode}\n')
         count = re.search(r'(\d+) checks, (\d+) failures', ran.stdout)
         assert count and int(count[2]) == 0, ran.stdout + ran.stderr

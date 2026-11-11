@@ -42,11 +42,11 @@ class ControlMemoryTests(unittest.TestCase):
                         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
                         self.assertIn("callback_count==i/4", run.stderr)
                         continue
-                    for case in ("packed", "recycling", "initial", "boundary", "tail", "pending", "short", "missing", "absent",
+                    for case in ("packed", "buffer-records", "indexed-records", "reinit-accounting", "immediate-submit", "inlined-deferred", "recycling", "initial", "boundary", "tail", "pending", "short", "missing", "absent",
                                  "disabled", "noop", "short-callback", "wrong-memory", "overflow-add", "overflow-end", "null-add"):
                         with self.subTest(optimization=optimization, case=case):
                             run = subprocess.run([str(executable), case], capture_output=True, text=True, timeout=20)
-                            rejected = case not in ("packed", "recycling", "initial", "boundary", "tail", "pending")
+                            rejected = case not in ("packed", "buffer-records", "indexed-records", "reinit-accounting", "immediate-submit", "inlined-deferred", "recycling", "initial", "boundary", "tail", "pending")
                             self.assertEqual(run.returncode, 73 if rejected else 0, run.stdout + run.stderr)
                             if rejected:
                                 self.assertIn("nonnull, non-wrapping" if case in ("overflow-add", "null-add") else "no space", run.stderr)

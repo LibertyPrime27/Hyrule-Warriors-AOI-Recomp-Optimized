@@ -10,6 +10,7 @@
 #include "gfx.h"
 #include "gfx_wsys.h"
 #include "input.h"
+#include "host.h"
 #include "ui/menu.h"
 #include "vk.h"
 #include "platform/platform.h"
@@ -360,6 +361,7 @@ int probe_present_color(void) {
                                  "TOTK_COLOR_GAMMA", "TOTK_UPSCALER", "TOTK_ASPECT", "TOTK_FULLSCREEN", "TOTK_PERF_OVERLAY"};
     static const char *values[] = {"0", "100", "100", "1", "bilinear", "fit", "0", "off"};
     for (unsigned i = 0; i < sizeof keys / sizeof keys[0]; i++) present_test_setting(keys[i], values[i]);
+    rt_trace |= RT_TRACE_PERF;   // exercise the presentation query pool and its device lifetime
     gfx_window_start();
     if (!vk_ctx()) { puts("probe-present-color: FAILED (no Vulkan device)"); return 1; }
     if (menu_is_open()) menu_toggle();
@@ -416,8 +418,23 @@ int probe_present_color(void) {
     }
     vk_present_capture(0);
     vk_shutdown();
+    // Recreate the device, then reuse every presentation slot. Stale timestamp
+    // handles must not survive shutdown, and the new pool must also be released.
+    if (ok) {
+        gfx_window_start();
+        vk_present_capture(1);
+        present_test_setting("TOTK_COLOR_BRIGHTNESS", "0");
+        Source s = {0};
+        ok = source_create_format(&s, VK_FORMAT_R8G8B8A8_UNORM, 128, 96);
+        for (int phase = 0; phase < 3 && ok; phase++)
+            ok = present_upload(&s, phase, 1, VK_IMAGE_LAYOUT_GENERAL) &&
+                 present_color_check(&s, phase, 1, NULL, 0, serial++, &checked);
+        source_destroy(&s);
+        vk_present_capture(0);
+        vk_shutdown();
+    }
     long errors = vk_validation_errors_total();
-    printf("probe-present-color: %s (%d frames, %llu checked pixels, %ld validation errors; RGBA/BGRA UNORM/sRGB, crop, resize, slots, FSR, colour adjustment)\n",
+    printf("probe-present-color: %s (%d frames, %llu checked pixels, %ld validation errors; RGBA/BGRA UNORM/sRGB, crop, resize, slots, FSR, colour adjustment, device recreation)\n",
            ok && !errors ? "passed" : "FAILED", serial, (unsigned long long)checked, errors);
     return ok && !errors ? 0 : 1;
 }

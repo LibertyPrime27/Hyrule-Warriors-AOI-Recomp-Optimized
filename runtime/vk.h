@@ -26,6 +26,7 @@ typedef struct VkCtx {
     VkQueue xfer_queue;                     // equals gfx_queue when xfer_shared
     int xfer_shared;                        // 1: no separate queue; serialise with gfx_queue
     VmaAllocator vma;
+    VkDeviceSize vma_block_size;          // keep the headroom worker aligned with VMA's configured block size
     VkSemaphore timeline;                   // one timeline semaphore; values are issued by vk_sync.c
     VkDebugUtilsMessengerEXT messenger;
     volatile int32_t validation_errors;        // errors seen by the messenger (TOTK_VK_VALIDATION=1)

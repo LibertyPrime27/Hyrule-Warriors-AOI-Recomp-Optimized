@@ -280,7 +280,10 @@ static void runtime_memory_line(uint64_t frame) {
            "zombies=%llu zombie_bytes=%llu texture_pins=%llu texture_pin_bytes=%llu texture_pin_index_bytes=%llu "
            "program_controls=%llu program_control_bytes=%llu program_controls_made=%llu "
            "program_control_bytes_made=%llu program_control_index_bytes=%llu program_ledger_partial=%llu "
-           "program_unmatched_frees=%llu program_duplicate_allocations=%llu",
+           "program_unmatched_frees=%llu program_duplicate_allocations=%llu "
+           "reclaim_copies=%llu reclaim_bytes=%llu reclaim_peak_bytes=%llu "
+           "record_buffers=%llu record_bytes=%llu record_peak_bytes=%llu record_reinits=%llu "
+           "program_source_blocks=%llu program_source_original_bytes=%llu program_source_bytes=%llu program_source_index_bytes=%llu",
            (unsigned long long)frame, (unsigned long long)s.copies, (unsigned long long)s.copy_bytes,
            (unsigned long long)s.copies_made, (unsigned long long)s.copy_index_bytes,
            (unsigned long long)s.zombies, (unsigned long long)s.zombie_bytes,
@@ -289,7 +292,13 @@ static void runtime_memory_line(uint64_t frame) {
            (unsigned long long)s.program_control_bytes, (unsigned long long)s.program_controls_made,
            (unsigned long long)s.program_control_bytes_made, (unsigned long long)s.program_control_index_bytes,
            (unsigned long long)s.program_ledger_disabled, (unsigned long long)s.program_unmatched_frees,
-           (unsigned long long)s.program_duplicate_allocations);
+           (unsigned long long)s.program_duplicate_allocations,
+           (unsigned long long)s.reclaim_copies, (unsigned long long)s.reclaim_bytes,
+           (unsigned long long)s.reclaim_peak_bytes,
+           (unsigned long long)s.record_buffers, (unsigned long long)s.record_bytes,
+           (unsigned long long)s.record_peak_bytes, (unsigned long long)s.record_reinits,
+           (unsigned long long)s.program_source_blocks, (unsigned long long)s.program_source_original_bytes,
+           (unsigned long long)s.program_source_bytes, (unsigned long long)s.program_source_index_bytes);
 }
 
 void perf_present(uint64_t frame) {

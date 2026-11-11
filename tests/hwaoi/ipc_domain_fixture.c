@@ -21,7 +21,11 @@ static char fixture_fatal_text[512];
 static int fixture_event_count, fixture_writable_count, fixture_closed;
 
 unsigned rt_trace;
-void rt_log(const char *fmt, ...) { (void)fmt; }
+static unsigned gsv_policy_logs, gsv_tipc_logs;
+void rt_log(const char *fmt, ...) {
+    if (strstr(fmt,"gsv: EXPERIMENTAL local frame-policy")) gsv_policy_logs++;
+    if (strstr(fmt,"gsv: TIPC")) gsv_tipc_logs++;
+}
 void rt_logf(const char *fmt, ...) { (void)fmt; }
 void rt_log_raw(const char *text, size_t size) { (void)text; (void)size; }
 void rt_fatal(const char *fmt, ...) {
@@ -744,6 +748,7 @@ static void case_gsv_local_frame_policy(void) {
     uint32_t handle = gsv_bootstrap(&root), second = gsv_bootstrap(&other);
     GsvUser *state = root->state, *other_state = other->state;
     TASSERT(!state->graphics_frame_policy_set && !other_state->graphics_frame_policy_set);
+    unsigned logs_before=gsv_policy_logs, tipc_before=gsv_tipc_logs;
     const uint32_t modes[] = {0, 0x11e, 0x13c, 0x178, 0x13c, 0x13c, 0};
     for (unsigned i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
         uint32_t message[64];
@@ -753,6 +758,15 @@ static void case_gsv_local_frame_policy(void) {
         TASSERT(state->graphics_frame_policy_set && state->graphics_frame_policy == modes[i]);
         TASSERT(!other_state->graphics_frame_policy_set); // session-local, not a global pacer setting
     }
+    TASSERT(gsv_policy_logs-logs_before==6 && gsv_tipc_logs==tipc_before);
+    // Explicit IPC tracing retains every request, including repeated tokens.
+    rt_trace|=RT_TRACE_IPC;
+    for(unsigned i=0;i<2;i++){
+        uint32_t message[64],mode=0x13c;wire_tipc(message,1111,&mode,4,0,0);
+        dispatch(root,message);tipc_success(message,0);
+    }
+    rt_trace&=~RT_TRACE_IPC;
+    TASSERT(gsv_policy_logs-logs_before==8 && gsv_tipc_logs-tipc_before==2);
     ipc_session_release(other); kern_handle_close(second);
     ipc_session_release(root); kern_handle_close(handle);
     TASSERT(_putenv_s("HWAOI_GSV_LOCAL_FRAME_POLICY", "") == 0);

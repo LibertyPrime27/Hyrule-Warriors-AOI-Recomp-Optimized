@@ -35,6 +35,7 @@
 #include "tex.h"
 #include "vk.h"
 #include "vk_exec.h"
+#include "nvn_program_source.h"
 #include "platform/platform.h"
 
 #define MAX_BINDINGS 128
@@ -988,6 +989,9 @@ void vk_exec_program_registered(const prog_t *p) {
         if (!program_stage_info(&p->sd[i], &st, &len) || st != NVN_STAGE_CS) continue;
         const uint8_t *ctl = p->sd[i].control, *code = (const uint8_t *)(uintptr_t)p->sd[i].data;
         if (gfx_shader_is_nvn2(ctl)) {                     // as program_stage_resolve, but a failure only skips it
+            // Registration may have packed the immutable source. Stage selection
+            // can read its prefix; lowering needs the complete checked expansion.
+            code = nvn_program_source(code);
             const uint8_t *lc, *lk;
             uint32_t actual;
             if (!nvn2_lower(ctl, code, &lc, &lk)) continue;
@@ -1021,6 +1025,7 @@ static void program_bind_refresh(VkExec *ex) {
 static void program_stage_resolve(const prog_t *p, int stage, const uint8_t **ctl,
                                   const uint8_t **code, uint32_t *length) {
     if (!gfx_shader_is_nvn2(*ctl)) return;
+    *code = nvn_program_source(*code);
     const uint8_t *lower_ctl, *lower_code;
     if (!nvn2_lower(*ctl, *code, &lower_ctl, &lower_code)) {
         gfx_shader_nvn2_dump_failure(*ctl, *code);

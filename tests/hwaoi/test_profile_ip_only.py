@@ -22,7 +22,8 @@ HEAD = r'''
 #define render_tid 43u
 #define main_tid 42u
 #define replay_tid 44u
-static unsigned checks, samples, stack_counts, queries, unwinds, suspends, resumes, creates;
+static unsigned checks, samples, stack_counts, queries, unwinds, suspends, resumes, creates, writes;
+static int64_t world_us;
 static int expect_ip, fail_context, fail_suspend, fail_create;
 static const char *opt_main,*opt_render,*opt_slow,*opt_chains,*opt_ip,*opt_frames="1400-2000";
 static unsigned char real_stack[32];
@@ -40,7 +41,7 @@ static const char *cfg_get(const char *name) {
 }
 static void rt_log(const char *format,...) { (void)format; }
 static uint64_t kern_now_ns(void) { return 100000; }
-static int64_t frame_step_world_us(void) { return 0; }
+static int64_t frame_step_world_us(void) { return world_us; }
 '''
 
 STUBS = r'''
@@ -49,10 +50,11 @@ static void count_stack(const uint64_t *rip,uint32_t depth) { CHECK(rip[0]==0x18
 static uint32_t unwind_copy(CONTEXT *ctx,uintptr_t lo,size_t n,uint64_t *rip) {
     CHECK(!expect_ip);CHECK(lo==(uintptr_t)real_stack && n==sizeof real_stack);
     CHECK(!memcmp(real_stack,stk_buf,sizeof real_stack));
-    unwinds++;rip[0]=ctx->Rip;return 1;
+    unwinds++;rip[0]=ctx->Rip;ctx->Rip=0x3000;return 1; // caller outside the image must not reclassify the sample
 }
 static void refresh_threads(DWORD self) { CHECK(self==99); }
 static void slow_dump(void) { CHECK(0); }
+static void prof_sampler_write(void) { CHECK(!written);writes++;written=1;stop=1; }
 static DWORD m_GetCurrentThreadId(void) { return 99; }
 static HANDLE m_GetCurrentThread(void) { return (HANDLE)(uintptr_t)99; }
 static BOOL m_SetThreadPriority(HANDLE h,int priority) { CHECK(h==(HANDLE)(uintptr_t)99);(void)priority;return TRUE; }
@@ -105,11 +107,13 @@ static DWORD m_GetLastError(void) { return 123; }
 TAIL = r'''
 static void sample_at(uint64_t frame,unsigned want) {
     cur_frame=frame;stop=0;
+    uint64_t in_before=threads[0].in_exe+threads[1].in_exe;
     samples=stack_counts=queries=unwinds=suspends=resumes=0;
     CHECK(sampler_main(NULL)==0);CHECK(samples==want);
     if(expect_ip) CHECK(!queries && !unwinds && !stack_counts && !ring_n && !stall_n);
     else CHECK(queries==want && unwinds==want && stack_counts==want);
     CHECK(resumes==(fail_suspend ? 0 : suspends));
+    CHECK(threads[0].in_exe+threads[1].in_exe-in_before==want);
 }
 static void start(void) {
     frame_lo=frame_hi=0;world_lo=world_hi=0;slow_ns=0;chains=0;ring_n=stall_n=0;
@@ -137,6 +141,17 @@ int main(int argc,char **argv) {
     opt_ip="0";start();sample_at(1500,1);
     opt_main=NULL;opt_render="1";start();sample_at(1500,1);
     opt_render=NULL;opt_chains="1";start();sample_at(1500,2);
+    // Finite profiles become available without closing a running game. Flush
+    // at the exclusive upper bound, exactly once; unbounded runs keep sampling.
+    written=0;slow_ns=0;frame_lo=1400;frame_hi=2000;world_hi=0;
+    prof_sampler_frame(1399,100000000,0);prof_sampler_frame(1999,100000000,0);CHECK(!writes);
+    prof_sampler_frame(2000,100000000,0);CHECK(writes==1&&written&&stop);
+    prof_sampler_frame(2001,100000000,0);CHECK(writes==1);
+    written=0;frame_hi=0;world_lo=100;world_hi=200;world_us=199;
+    prof_sampler_frame(3000,100000000,0);CHECK(writes==1);
+    world_us=200;prof_sampler_frame(3001,100000000,0);CHECK(writes==2&&written);
+    written=0;world_hi=0;prof_sampler_frame(UINT64_MAX,100000000,0);CHECK(writes==2);
+    out_path=NULL;frame_hi=10;prof_sampler_frame(20,100000000,0);CHECK(writes==2);
     fail_create=1;CHECK(prof_sampler_start()==0 && out_path==NULL);
     CHECK(creates==8);
     printf("%u checks passed\n",checks);return 0;
@@ -149,7 +164,8 @@ def fixture_source():
     declarations = source[source.index("#define PROF_SLOTS"):source.index("static void count_rip")]
     loop = source[source.index("static int in_window("):source.index("static int cmp_desc(")]
     start = source[source.index("int prof_sampler_start("):source.index("// perf_present, every present")]
-    return HEAD + declarations + STUBS + loop + start + TAIL
+    frame = source[source.index("void prof_sampler_frame("):]
+    return HEAD + declarations + STUBS + loop + start + frame + TAIL
 
 
 @unittest.skipUnless(CC.is_file(), "native fixture requires F:/llvm-mingw")

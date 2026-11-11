@@ -18,6 +18,7 @@
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_hmap.h"
+#include "nvn_program_source.h"
 #include "nvn_geometry_control.h"
 #include "nvn_tex.h"
 #include "platform/platform.h"
@@ -530,6 +531,13 @@ void nvn_program_memory_stats(NvnMemoryStats *out) {
     out->program_unmatched_frees = program_memory_unmatched_frees;
     out->program_duplicate_allocations = program_memory_duplicates;
     plat_mutex_unlock_shared(&program_memory_lock);
+    NvnProgramSourceStats source;
+    nvn_program_source_stats(&source);
+    out->program_control_bytes += source.auxiliary_bytes;
+    out->program_source_blocks = source.blocks;
+    out->program_source_original_bytes = source.original_bytes;
+    out->program_source_bytes = source.retained_bytes;
+    out->program_source_index_bytes = source.index_bytes;
 }
 
 // NVNboolean nvnProgramInitialize(NVNprogram *p, NVNdevice *d)
@@ -542,6 +550,7 @@ NVN_API(nvnProgramInitialize) {
 static void prog_release(prog_t *o) {
     if (o->serial) gfx_backend()->program_release(o);
     o->serial = 0;
+    nvn_program_source_release(o);
     program_memory_released(o->owned_control);
     free(o->owned_control);
     o->owned_control = NULL;
@@ -589,6 +598,7 @@ static int prog_set_shaders(prog_t *o, int n, const NVNshaderData *sd) {
     for (int i = 0; i < n; i++) {
         const uint8_t *ctl = next[i].control, *code = (const uint8_t *)(uintptr_t)next[i].data;
         if (ctl_size[i]) {
+            code = nvn_program_source(code);
             uint8_t *saved_ctl = owned + at;
             at += ((size_t)ctl_size[i] + 7u) & ~(size_t)7u;
             uint8_t *saved_code = owned + at;
@@ -615,6 +625,11 @@ static int prog_set_shaders(prog_t *o, int n, const NVNshaderData *sd) {
     memcpy(o->sd, next, sizeof next);
     o->owned_control = owned;
     program_memory_allocated(owned, raw_bytes + portable_bytes);
+    size_t packed_bytes = nvn_program_source_pack(o, raw_bytes + portable_bytes);
+    if (packed_bytes) {
+        program_memory_released(owned);
+        program_memory_allocated(o->owned_control, packed_bytes);
+    }
     o->serial = nvn_new_serial();
     NVN_LOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)o, n, n ? (unsigned long long)next[0].data : 0ull);
     vk_exec_program_registered(o);

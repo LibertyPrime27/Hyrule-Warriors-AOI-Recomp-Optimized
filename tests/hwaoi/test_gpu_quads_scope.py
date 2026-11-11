@@ -137,7 +137,7 @@ int main(int argc,char **argv){
  puts("GPU QUADS scope checks passed");return 0;
 }
 '''
-    return (prefix + batching + function(text, "static int gpu_quads_graphics(") + function(text, "static int gpu_quads_draw(")
+    return (stages + prefix + batching + function(text, "static int gpu_quads_graphics(") + function(text, "static int gpu_quads_draw(")
             + main)
 
 

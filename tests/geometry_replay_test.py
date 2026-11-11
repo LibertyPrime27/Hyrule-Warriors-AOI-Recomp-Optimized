@@ -45,6 +45,11 @@ static int enabled,fix_c0,warnings,async_on,translate_fail,translate_pending,tra
 static GfxShaderAnswers last_answers;
 static const uint8_t *native_code;
 static unsigned lower_calls;
+const uint8_t *nvn_program_source(const uint8_t *p) {return p;}
+int vk_texture_slot_buffer_locked(const dpool_ref *pool,int id,uint64_t *addr,int *format,uint32_t *elements) {
+    // This fixture authors image descriptors only, with no buffer textures.
+    (void)pool;(void)id;(void)addr;(void)format;(void)elements;return 0;
+}
 uint64_t gfx_shader_nvn2_hash(const uint8_t *ctl,const uint8_t *code) {(void)ctl;(void)code;return 17;}
 void gfx_shader_nvn2_dump_failure(const uint8_t *ctl,const uint8_t *code) {(void)ctl;(void)code;abort();}
 int nvn2_lower(const uint8_t *ctl,const uint8_t *code,const uint8_t **out_ctl,const uint8_t **out_code) {
@@ -86,7 +91,9 @@ const GfxShader *gfx_shader_await(int stage,const uint8_t *ctl,const uint8_t *co
     where = base.index('static int nvn_stage_of(')
     stage_helpers = draw[stage_start:stage_end]
     # Binding composition has its own fixture; replay here supplies a complete program.
-    for prefix in ('static int program_stage_lookup(', 'static void program_bind_refresh('):
+    # Registration/prefetch has its own source-cache integration fixture.
+    for prefix in ('static int program_stage_lookup(', 'static void program_bind_refresh(',
+                   'void vk_exec_program_registered('):
         stage_helpers = stage_helpers.replace(function(stage_helpers, prefix), '')
     base = base[:where] + stage_helpers + draw[slot_start:slot_end] + base[where:]
     extra = [function(shader, 'int gfx_shader_is_nvn2('), function(pipeline, 'uint8_t vk_geometry_input('),
@@ -112,6 +119,13 @@ _Alignas(256) static uint64_t pointer_words[4];
 _Alignas(256) static uint32_t output_words[64];
 static CbRes callback_resources;
 static unsigned uses,gpu_writes,drops,pending_writes,counts,barriers,passes;
+// Diagnostics are disabled in this bounded CPU resource/ordering fixture.
+static uint64_t barriers_recorded;
+static int readback_diagnostics_on(void) {return 0;}
+static void fallback_storage_diag(const GfxShaderRes *r,int st,int written,uint64_t address,
+                                  const VkDescriptorBufferInfo *resolved) {
+    (void)r;(void)st;(void)written;(void)address;(void)resolved;
+}
 static uint64_t expected_count_bytes=sizeof output_words;
 static uint64_t pending_addr,pending_size;
 static int last_use;
@@ -310,14 +324,14 @@ def main():
         exe = out / ('replay' + opt + ('.exe' if os.name == 'nt' else ''))
         command = [args.cc, opt, '-Wall', '-Wextra', '-Werror', '-I', str(ROOT / 'runtime'),
                    '-I', str(args.deps / 'include'), '-I', str(args.deps / 'include/vma'), str(fixture), '-o', str(exe)]
-        run = subprocess.run(command, capture_output=True, text=True)
-        (out / (opt + '-compile.log')).write_text(run.stdout + run.stderr)
+        run = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        (out / (opt + '-compile.log')).write_text(run.stdout + run.stderr, encoding='utf-8')
         if run.returncode:
             print(run.stdout + run.stderr)
             return run.returncode
         for mode in ('0', '1'):
-            run = subprocess.run([str(exe), mode], capture_output=True, text=True)
-            (out / (opt + '-' + mode + '.log')).write_text(run.stdout + run.stderr)
+            run = subprocess.run([str(exe), mode], capture_output=True, text=True, encoding='utf-8', errors='replace')
+            (out / (opt + '-' + mode + '.log')).write_text(run.stdout + run.stderr, encoding='utf-8')
             print(opt, mode, run.stdout + run.stderr)
             failed |= run.returncode
     return failed

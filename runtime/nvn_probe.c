@@ -445,6 +445,7 @@ static uint64_t record_all(void) {
     REC(OP_SET_SAMP_POOL, CALL(nvnCommandBufferSetSamplerPool, U(c), U(&sp2)));
     REC(OP_COPY_B2T, CALL(nvnCommandBufferCopyBufferToTexture, U(c), 0x9000, U(&tex1), U(&view), U(&rg), 0));
     REC(OP_COPY_STRIDE, CALL(nvnCommandBufferSetCopyRowStride, U(c), 256));
+    REC(OP_COPY_IMAGE_STRIDE, CALL(nvnCommandBufferSetCopyImageStride, U(c), 512));
     REC(OP_BLEND_COLOR, CALL(nvnCommandBufferSetBlendColor, U(c), U(rgba)));
     REC(OP_COPY_T2B, CALL(nvnCommandBufferCopyTextureToBuffer, U(c), U(&tex1), 0, U(&rg), 0xa000, 0));
     REC(OP_COPY_T2T, CALL(nvnCommandBufferCopyTextureToTexture, U(c), U(&tex1), 0, U(&rg), U(&tex2), 0, U(&rg2), 0));
@@ -457,11 +458,13 @@ static uint64_t record_all(void) {
     REC(OP_DRAW_IDX_IND, CALL(nvnCommandBufferDrawElementsIndirect, U(c), NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_INT,
                               0x8000, 0xc000));
     REC(OP_DISPATCH_IND, CALL(nvnCommandBufferDispatchComputeIndirect, U(c), 0xc100));
+    REC(OP_DRAW_IND, CALL(nvnCommandBufferDrawArraysIndirect, U(c), NVN_DRAW_PRIMITIVE_TRIANGLES, 0xc080));
     REC(OP_CLEAR_BUF, CALL(nvnCommandBufferClearBuffer, U(c), 0xc200, 0x40, 0xdeadbeef));
     REC(OP_CLEAR_BUF, CALL(nvnCommandBufferReportValue, U(c), 0x1234, 0xc300));
     static const uint32_t pushed[4] = {0x39b60b61, 0x3a21d13a, 0x45340000, 0x44ca8000};   // 1/2880, 1/1620, 2880, 1620
     REC(OP_PUSH_CONST, CALL(nvnCommandBufferPushGraphicsConstants, U(c), 0, 0x10, sizeof pushed, U(pushed)));
     REC(OP_WAIT_SYNC, CALL(nvnCommandBufferWaitSync, U(c), U(&syncs)));
+    REC(OP_FENCE_SYNC, CALL(nvnCommandBufferFenceSync, U(c), U(&syncs), NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0));
     CALL(nvnCommandBufferPushComputeConstants, U(c), 0, 0, 2, U(pushed));   // under 4 bytes: dropped, as the driver does
     static const int thresholds[4] = {1, 2, 3, 4};
     CALL(nvnCommandBufferSetColorReductionEnable, U(c), 1);   // hints: nothing recorded
@@ -494,7 +497,10 @@ static void parse_all(uint64_t h) {
         }
         idx++;
         kinds[o->op]++;
-        const void *a = nvn_op_payload(o);
+        NvnOpScratch normalized;
+        const void *a = nvn_op_normalize(o, &normalized);
+        CHECK(a != NULL, "record payload decodes within its byte extent");
+        if (!a) return;
         switch (o->op) {
         case OP_SIGNAL_EVENT: {
             const p_signal_event *p = a;
@@ -644,6 +650,7 @@ static void parse_all(uint64_t h) {
             break;
         }
         case OP_COPY_STRIDE: CHECK(((const p_copy_stride *)a)->stride == 256, "COPY_STRIDE payload"); break;
+        case OP_COPY_IMAGE_STRIDE: CHECK(((const p_copy_stride *)a)->stride == 512, "COPY_IMAGE_STRIDE payload"); break;
         case OP_BLEND_COLOR: CHECK(((const p_blend_color *)a)->rgba[2] == 0.3f, "BLEND_COLOR payload"); break;
         case OP_COPY_T2B: {
             const p_copy_b2t *p = a;
@@ -701,6 +708,17 @@ static void parse_all(uint64_t h) {
         }
         case OP_WAIT_SYNC: CHECK(((const p_wait_sync *)a)->sync == (const sync_t *)(const void *)&syncs,
                                  "WAIT_SYNC retains the submit-time source pointer"); break;
+        case OP_FENCE_SYNC: {
+            const p_fence_sync *p = a;
+            CHECK(p->sync == (sync_t *)(void *)&syncs && p->condition == NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE && !p->flags,
+                  "FENCE_SYNC retains the output and supported completion policy");
+            break;
+        }
+        case OP_DRAW_IND: {
+            const p_draw_ind *p = a;
+            CHECK(p->prim == NVN_DRAW_PRIMITIVE_TRIANGLES && p->ind == 0xc080, "DRAW_IND payload");
+            break;
+        }
         default: CHECK(0, "unexpected op %s", nvn_op_name(o->op)); break;
         }
     }

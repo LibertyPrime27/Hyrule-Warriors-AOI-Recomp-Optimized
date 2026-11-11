@@ -51,7 +51,7 @@ static const char *const known[] = {
     "ROMFS_PROOF_DIR", "ROMFS_VERIFY", "RUMBLE", "RUMBLE_CURVE", "RUMBLE_STRENGTH", "RUMBLE_TRIGGERS", "SHADER_CACHE",
     "SCENE_SHARPNESS", "SHADER_MEMO", "SHARED_FONTS", "SHARPNESS", "SHOTS", "SHOTS_DIR", "SHOTS_FULL", "SHOTS_LATEST", "SPEED_PROBE", "SPIN", "SPIN_HANDOFF_US", "SPLIT_DRAWS", "SPLIT_US", "STICK_DEADZONE", "SWKBD_ANSWER",
     "SWKBD_TEST", "TEST_PAD", "TEST_PREPARE_SHADERS", "TEX_ALIAS", "TEX_MEMO", "TEX_VRAM_PRESSURE", "TIMER_1MS", "TRACE", "UBO_SNAPSHOT", "UPSCALER", "VK_DYN_A2C", "VK_DYN_VERTEX", "VK_NO_FLOAT64",
-    "VK_PRESENT", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_VALIDATION", "VOLUME", "VRAM_HEADROOM", "VS_OUTS",
+    "VK_PRESENT", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_VALIDATION", "VOLUME", "VRAM_HEADROOM", "SMALL_MEMORY_POOLS", "COPY_RECLAIM", "SOURCE_COMPRESS", "LAZY_HEAP", "LAZY_HEAP_KIB", "VS_OUTS",
     "WB_EXACT", "WB_FENCE_LIMIT", "WINDOW_SIZE", "XLATE", "XLATE_ID", "XLATE_PREFETCH", "XLATE_PROCS", "ZSTD_CHECK", "ZSTD_NATIVE",
 };
 
@@ -138,12 +138,22 @@ static const CfgMeta metas[] = {
     {"STICK_DEADZONE", "8", "0..50", LIVE}, {"MOUSE_SENS", "1", "0..10", LIVE},
     {"MENU_LANG", "", "en|ru", LIVE},
     // Advanced: scheduling
+    {"LAZY_HEAP", "0", "0|1", RESTART}, // Windows-only demand-commit experiment
+    {"LAZY_HEAP_KIB", "2048", "64|256|2048", RESTART},
+    {"COPY_RECLAIM", "1", "0|1", RESTART}, // bounded CPU-only reclamation after replay/handle retirement
+#if RT_TARGET_HWAOI
+    {"SOURCE_COMPRESS", "1", "0|1", RESTART}, // retain unused single-stage NVN2 source in a lossless form
+    {"SMALL_MEMORY_POOLS", "1", "0|1", RESTART}, // smaller retained upload/allocator blocks; no change to GPU mirrors
+#else
+    {"SOURCE_COMPRESS", "0", "0|1", RESTART},
+    {"SMALL_MEMORY_POOLS", "0", "0|1", RESTART},
+#endif
     {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "0", "0|1", RESTART},
     {"FREE_CORES", "0", "0|1", RESTART}, {"TIMER_1MS", "1", "0|1", RESTART},
     // shaders and pipelines
     {"PIPE_WAIT", "default", "default|draw", RESTART}, {"PIPE_SKIP", "fullscreen", "strict|any|fullscreen", RESTART},
-    {"PIPE_SCENE", "1", "0|1", RESTART},
-    {"XLATE_PREFETCH", "1", "0|1", RESTART},   // vk_exec_draw.c: compute shaders translate from program registration   // vk_exec.c scene_sized: new-scene draws into scene-size targets skip while shaders build
+    {"PIPE_SCENE", "1", "0|1", RESTART},       // new-scene draws may wait for background shaders
+    {"XLATE_PREFETCH", "1", "0|1", RESTART},   // compute shaders translate from program registration
     {"LIB_PREBUILD", "1", "0|1", RESTART}, {"LIB_PREBUILD_THREADS", "", "1..64", RESTART},
     {"PIPE_PREBUILD", "1", "0|1", RESTART}, {"PREWARM_XLATE", "", "1..64", RESTART}, {"GPL", "", "0|1", RESTART},
     // textures and memory

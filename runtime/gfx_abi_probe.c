@@ -5,7 +5,12 @@
 // Needs no game files.
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
+#include "cfg.h"
 #include "gfx.h"
 #include "platform/platform.h"
 
@@ -100,6 +105,98 @@ static void check_write_watch(void) {
     printf("write-watch: alias page written once: reported once, then not\n");
 }
 
+#ifdef _WIN32
+typedef struct { HANDLE gate; uint64_t address; uint32_t value; } DemandProbeWrite;
+static DWORD WINAPI demand_probe_write(void *opaque) {
+    DemandProbeWrite *w = opaque;
+    if (WaitForSingleObject(w->gate, 10000) != WAIT_OBJECT_0) return 1;
+    *(volatile uint32_t *)(uintptr_t)w->address = w->value;
+    return 0;
+}
+#endif
+
+static void check_demand_heap(void) {
+    if (!cfg_bool("TOTK_LAZY_HEAP")) return;
+    const RtGuestLayout *g = mem_layout();
+    uint64_t heap = 0, end;
+    int before = failures;
+    CHECK(!mem_set_heap_size(64ull << 20, &heap), "demand heap 64 MiB");
+    CHECK(plat_mem_state(heap, heap + 1, &end) == PLAT_MEM_RESERVED, "unused heap was committed eagerly");
+    volatile uint32_t *value = (volatile uint32_t *)(uintptr_t)(heap + (8ull << 20));
+    CHECK(*value == 0, "first demand read is zero");
+    *value = 0xdecaf123;
+    CHECK(plat_mem_state(heap + (32ull << 20), heap + (32ull << 20) + 1, &end) == PLAT_MEM_RESERVED,
+          "access committed an unrelated heap range");
+    uint32_t read = 1;
+    CHECK(plat_mem_read(heap + (48ull << 20), &read, sizeof read) && !read, "kernel-mediated read prepares its source");
+    CHECK(!mem_prepare_range(heap + (64ull << 20), 1) && !plat_mem_readable(heap + (64ull << 20), 1),
+          "a range beyond the logical heap must stay invalid");
+    uint64_t stack = g->stack.base + 0x100000;
+    CHECK(!mem_map(stack, (uintptr_t)value, 0x1000), "demand heap stack map");
+    CHECK(!plat_mem_read((uintptr_t)value, &read, sizeof read) &&
+          plat_mem_state((uintptr_t)value, (uintptr_t)value + 1, &end) == PLAT_PROT_NONE,
+          "host preparation must preserve a moved stack's source guard");
+    CHECK(!mem_unmap(stack, (uintptr_t)value, 0x1000) && *value == 0xdecaf123, "demand heap stack round trip");
+    *(volatile uint32_t *)(uintptr_t)(heap + (48ull << 20)) = 99;
+    CHECK(!mem_set_heap_size(32ull << 20, &heap), "shrink demand heap");
+    CHECK(!mem_prepare_range(heap + (48ull << 20), 4), "shrunk heap range must stay invalid");
+    CHECK(!mem_set_heap_size(64ull << 20, &heap) && *(volatile uint32_t *)(uintptr_t)(heap + (48ull << 20)) == 0,
+          "regrown demand heap must not expose old bytes");
+#ifdef _WIN32
+    HANDLE gate = CreateEvent(NULL, TRUE, FALSE, NULL), threads[8];
+    DemandProbeWrite writes[8];
+    CHECK(gate != NULL, "concurrent demand-fault gate");
+    for (unsigned i = 0; i < 8; i++) {
+        writes[i] = (DemandProbeWrite){gate, heap + (40ull << 20) + 4096 * i, 100 + i};
+        threads[i] = CreateThread(NULL, 0, demand_probe_write, &writes[i], 0, NULL);
+        CHECK(threads[i] != NULL, "concurrent demand-fault writer");
+    }
+    SetEvent(gate);
+    for (unsigned i = 0; i < 8; i++) if (threads[i]) {
+        DWORD code = 1;
+        CHECK(WaitForSingleObject(threads[i], 10000) == WAIT_OBJECT_0 && GetExitCodeThread(threads[i], &code) && !code,
+              "concurrent demand-fault completion");
+        CHECK(*(volatile uint32_t *)(uintptr_t)writes[i].address == writes[i].value, "concurrent demand write preserved");
+        CloseHandle(threads[i]);
+    }
+    CloseHandle(gate);
+    HANDLE input, output;
+    CHECK(CreatePipe(&input, &output, NULL, 0), "authored kernel-IO pipe");
+    const uint32_t authored[4] = {11, 22, 33, 44};
+    DWORD count = 0;
+    CHECK(WriteFile(output, authored, sizeof authored, &count, NULL) && count == sizeof authored, "pipe source write");
+    uint64_t dst = heap + (56ull << 20);
+    mem_thaw(dst, sizeof authored);
+    CHECK(ReadFile(input, (void *)(uintptr_t)dst, sizeof authored, &count, NULL) && count == sizeof authored &&
+          !memcmp((void *)(uintptr_t)dst, authored, sizeof authored), "prepared kernel IO into demand heap");
+    uint64_t direct = dst + 0x20000;
+    CHECK(plat_mem_state(direct, direct + 1, &end) == PLAT_MEM_RESERVED, "direct file-read destination starts reserved");
+    CHECK(WriteFile(output, authored, sizeof authored, &count, NULL) && count == sizeof authored, "direct read source");
+    CHECK(plat_file_pread((PlatFile *)input, (void *)(uintptr_t)direct, sizeof authored, 0) == sizeof authored &&
+          !memcmp((void *)(uintptr_t)direct, authored, sizeof authored), "platform file read prepares its destination");
+    uint64_t zero_source = heap + (58ull << 20);
+    CHECK(plat_mem_state(zero_source, zero_source + 1, &end) == PLAT_MEM_RESERVED, "file-write source starts reserved");
+    CHECK(plat_file_pwrite((PlatFile *)output, (const void *)(uintptr_t)zero_source, sizeof authored, 0) == sizeof authored,
+          "platform file write prepares its source");
+    uint32_t zero_result[4] = {1, 1, 1, 1};
+    CHECK(ReadFile(input, zero_result, sizeof zero_result, &count, NULL) && count == sizeof zero_result &&
+          !zero_result[0] && !zero_result[1] && !zero_result[2] && !zero_result[3], "untouched logical bytes write as zero");
+    CloseHandle(input); CloseHandle(output);
+#endif
+    CHECK(mem_prepare_range(heap + (60ull << 20), 65536), "aligned host/GPU import preparation");
+    for (uint64_t at = heap + (60ull << 20); at < heap + (60ull << 20) + 65536; at += 4096)
+        CHECK(plat_mem_state(at, at + 1, &end) == PLAT_PROT_RW, "all pages of the prepared import must be accessible");
+    CHECK(plat_mem_state(heap + (60ull << 20) + 65536, heap + (60ull << 20) + 65537, &end) == PLAT_MEM_RESERVED,
+          "host/GPU preparation committed an unrelated page");
+    *(volatile uint32_t *)(uintptr_t)(heap + (60ull << 20) + 4096) = 88;
+    CHECK(plat_mem_decommit(heap + (60ull << 20) + 4096, 4096), "explicit page decommit");
+    read = 1;
+    CHECK(plat_mem_read(heap + (60ull << 20) + 4096, &read, sizeof read) && !read,
+          "decommit invalidates the backing cache before the next host read");
+    CHECK(!mem_set_heap_size(0, &heap) && !mem_prepare_range(heap, 1), "released demand heap must stay invalid");
+    printf("demand-heap: zeroing, guards, stack maps, shrink/regrow and prepared IO: %s\n", failures == before ? "ok" : "FAIL");
+}
+
 int probe_gfx_abi(void) {
     size_t tightest = (size_t)-1;
     const char *tight = "";
@@ -117,6 +214,7 @@ int probe_gfx_abi(void) {
     CHECK(RT_GPU_VA_BASE >= RT_ADDRESS_LIMIT && RT_GPU_VA_SIZE > 0, "GPU address window %#llx overlaps the guest space",
           RT_GPU_VA_BASE);
     check_write_watch();
+    check_demand_heap();
     printf("gfx-abi: %d layouts fit (tightest %s, %zu bytes spare), cmd_t inline fields at +0x20/+0x28, "
            "NVNtextureView %zu bytes\n", (int)(sizeof fits / sizeof *fits), tight, tightest, sizeof(NVNtextureView));
     if (failures) {

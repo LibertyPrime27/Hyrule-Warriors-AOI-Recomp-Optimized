@@ -24,6 +24,8 @@
 #define vkQueueSubmit2 synthetic_submit
 #define vkDeviceWaitIdle synthetic_device_idle
 #define vkDestroyFence synthetic_destroy_fence
+#define vkFreeCommandBuffers synthetic_free_commands
+#define vkDestroyQueryPool synthetic_destroy_query_pool
 #define vkCreateFence synthetic_create_fence
 #define vkDestroyCommandPool synthetic_destroy_pool
 #define vmaDestroyPool synthetic_vma_destroy_pool
@@ -51,6 +53,8 @@ void rt_log(const char *format, ...) { (void)format; }
 void perf_count(int kind) { (void)kind; }
 uint64_t perf_begin(void) { return 0; }
 void perf_replay(uint64_t start) { (void)start; }
+unsigned perf_replay_scope_begin(void) { return 0; }
+void perf_replay_scope_end(unsigned previous) { check(previous == 0, "synthetic replay role restored"); }
 // The actual shared split helper also contains the ordered-readback branch. Retirement scenarios must keep using
 // the nonwaiting branch; reaching any of these new dependencies is a fixture failure, not a simulated success.
 void perf_end(int kind, uint64_t start) { (void)kind; (void)start; check(0, "retirement never times a prefix wait"); }
@@ -154,6 +158,10 @@ static void synthetic_vma_destroy_buffer(VmaAllocator a, VkBuffer b, VmaAllocati
     (void)a; (void)b; (void)m; check(0, "fixture retires images and views only");
 }
 static void synthetic_destroy_fence(VkDevice d, VkFence f, const VkAllocationCallbacks *a) { (void)d; (void)f; (void)a; check(0, "no staging fences"); }
+static void synthetic_free_commands(VkDevice d,VkCommandPool p,uint32_t n,const VkCommandBuffer *b){(void)d;(void)p;(void)n;(void)b;check(0,"no upload commands");}
+static void synthetic_destroy_query_pool(VkDevice d,VkQueryPool p,const VkAllocationCallbacks *a){(void)d;(void)p;(void)a;check(0,"no upload timestamps");}
+void vk_vertex_cache_shutdown(void) {}
+void vk_vertex_cache_pool_shutdown(void) {}
 static VkResult synthetic_create_fence(VkDevice d, const VkFenceCreateInfo *i, const VkAllocationCallbacks *a, VkFence *f) {
     (void)d; (void)i; (void)a; (void)f; check(0, "retirement never creates a prefix fence"); return VK_ERROR_UNKNOWN;
 }

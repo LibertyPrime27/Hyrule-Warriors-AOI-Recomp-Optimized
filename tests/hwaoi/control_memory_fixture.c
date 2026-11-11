@@ -7,6 +7,7 @@
 #include <string.h>
 #include <windows.h>
 #include "nvn_api.h"
+#include "nvn_reclaim.h"
 #include "platform/platform.h"
 
 #define PROC(n) void nvnp_##n(Cpu *c)
@@ -19,6 +20,12 @@ PROC(nvnCommandBufferSetViewports); PROC(nvnCommandBufferSetPointSize);
 PROC(nvnCommandBufferBindBlendState); PROC(nvnCommandBufferBindColorState);
 PROC(nvnCommandBufferBindChannelMaskState); PROC(nvnCommandBufferBindMultisampleState);
 PROC(nvnCommandBufferBindPolygonState); PROC(nvnCommandBufferBindDepthStencilState);
+PROC(nvnCommandBufferBindTexture); PROC(nvnCommandBufferBindSeparateSampler); PROC(nvnCommandBufferBindImage);
+PROC(nvnCommandBufferBindTexturesDeferred);
+PROC(nvnCommandBufferCallCommands);
+PROC(nvnCommandBufferBindUniformBuffer); PROC(nvnCommandBufferBindUniformBuffers); PROC(nvnCommandBufferBindStorageBuffer);
+PROC(nvnCommandBufferBindVertexBuffer);
+PROC(nvnCommandBufferDrawElements); PROC(nvnCommandBufferDrawElementsBaseVertex); PROC(nvnCommandBufferDrawElementsInstanced);
 #define U(p) ((uint64_t)(uintptr_t)(p))
 #define CHECK(x) do { if (!(x)) { fprintf(stderr,"line %d: %s\n",__LINE__,#x);exit(1); } } while (0)
 static uint64_t call(void (*fn)(Cpu *), const uint64_t args[8]) {
@@ -47,7 +54,10 @@ uint64_t gfx_replayed_submits(void) {return replayed;}
 const GfxBackend *gfx_backend(void) {rt_fatal("unexpected GPU wait");return NULL;}
 const char *cfg_get(const char *name) {(void)name;return NULL;}
 void nvn_program_memory_stats(NvnMemoryStats *out) {(void)out;}
+int nvn_reclaim_submit(void *p,uint64_t n,uint64_t b,void(*fn)(void*)){(void)p;(void)n;(void)b;(void)fn;return 0;}
+void nvn_reclaim_stats(NvnReclaimStats *out){memset(out,0,sizeof *out);}
 void rt_log(const char *fmt,...) {(void)fmt;}
+uint64_t plat_now_ns(void) { return GetTickCount64()*1000000ull; }
 int plat_mem_readable(uint64_t addr,uint64_t size) {(void)addr;(void)size;return 0;}
 void rt_fatal(const char *fmt,...) {
     va_list ap;va_start(ap,fmt);vfprintf(stderr,fmt,ap);va_end(ap);fputc('\n',stderr);exit(73);
@@ -152,6 +162,12 @@ static void packed_records(void) {
     for(unsigned kind=0;kind<6;kind++)call(setters[kind],(const uint64_t[8]){U(&command),U(state)});
     Cpu cpu={0};cpu.x[0]=U(&command);float point=2.5f;memcpy(&cpu.v[0],&point,sizeof point);
     nvnp_nvnCommandBufferSetPointSize(&cpu);
+    uint64_t handles[3]={11,22,33};
+    CALL(nvnCommandBufferBindTexture,U(&command),0,127,UINT64_C(0x123456789abcdef0));
+    CALL(nvnCommandBufferBindSeparateSampler,U(&command),4,7,0);
+    CALL(nvnCommandBufferBindImage,U(&command),5,31,UINT64_MAX);
+    CALL(nvnCommandBufferBindTexturesDeferred,U(&command),0,1,1,U(handles));
+    CALL(nvnCommandBufferBindTexturesDeferred,U(&command),4,3,3,U(handles));
     uint64_t handle=CALL(nvnCommandBufferEndRecording,U(&command));
     const uint8_t *cursor=(const uint8_t *)(uintptr_t)handle+8;
     for(unsigned n=0;n<=16;n++){
@@ -166,16 +182,136 @@ static void packed_records(void) {
         const p_bind_state *b=(const p_bind_state *)(cursor+8);CHECK(b->kind==(int)kind);
         CHECK(!memcmp(b->bytes,kind<6?(const void *)state:(const void *)&point,n));cursor+=h->size;
     }
+    const uint32_t ops[]={OP_BIND_TEX,OP_BIND_SAMP,OP_BIND_IMG,OP_BIND_TEX,OP_BIND_TEX};
+    const int stages[]={0,4,5,0,4},slots[]={127,7,31,1,3};
+    const uint64_t values[]={UINT64_C(0x123456789abcdef0),0,UINT64_MAX};
+    const uint8_t *deferred_start=NULL;
+    for(unsigned i=0;i<5;i++){
+        const op_hdr *h=(const op_hdr*)cursor;NvnOpScratch scratch;
+        CHECK(h->op==ops[i]&&h->size==(i<3?24:i==3?40:56));
+        const p_bind_handles *b=nvn_op_normalize(h,&scratch);
+        CHECK(b&&b->stage==stages[i]&&b->first==slots[i]&&b->n==(i==4?3:1));
+        CHECK(b->src==(i<3?0:U(handles))&&b->h[0]==(i<3?values[i]:11));
+        if(i==3)deferred_start=cursor;
+        cursor+=h->size;
+    }
     CHECK(((const op_hdr *)cursor)->op==OP_END&&nvn_handle_bytes(handle)==(uint64_t)(cursor+8-(const uint8_t *)(uintptr_t)handle));
-    CHECK(((cmd_t *)&command)->hw_used==17*400+7*40); // same guest-visible usage as the previous fixed records
+    CHECK(((cmd_t *)&command)->hw_used==17*400+7*40+116); // same guest-visible usage as the previous fixed records
+    handles[0]=44;handles[2]=66;nvn_submit_prepare(&handle,1);
+    const p_bind_handles *deferred=(const p_bind_handles*)(deferred_start+8);
+    CHECK(deferred->h[0]==44&&deferred->src==U(handles));
+    deferred=(const p_bind_handles*)(deferred_start+40+8);
+    CHECK(deferred->h[0]==44&&deferred->h[1]==22&&deferred->h[2]==66);
     memset(viewport,0,sizeof viewport);memset(state,0,sizeof state);
     CHECK(((const p_viewports *)((const uint8_t *)(uintptr_t)handle+32))->v[0][0]==.25f);
-    retire(&command,storage,sizeof storage);CHECK(!stats().copies);
+    replayed=nvn_submit_count();retire(&command,storage,sizeof storage);CHECK(!stats().copies&&!stats().zombies);
     CALL(nvnCommandBufferFinalize,U(&command));
+}
+static void immediate_submission(void) {
+    NVNcommandBuffer command;uint8_t control[64];initialize(&command,control,sizeof control);
+    CALL(nvnCommandBufferBeginRecording,U(&command));
+    for(unsigned i=0;i<1000;i++)CALL(nvnCommandBufferBindTexture,U(&command),4,i%128,(uint64_t)i);
+    uint64_t handle=CALL(nvnCommandBufferEndRecording,U(&command));
+    SYSTEM_INFO info;GetSystemInfo(&info);size_t page=info.dwPageSize;
+    void *protected_page=(void *)(((uintptr_t)handle+page-1)&~(uintptr_t)(page-1));
+    CHECK((uintptr_t)protected_page>(uintptr_t)handle&&
+          (uintptr_t)protected_page+page<(uintptr_t)handle+nvn_handle_bytes(handle));
+    DWORD old;CHECK(VirtualProtect(protected_page,page,PAGE_NOACCESS,&old));
+    // Immediate records have no submit-time CPU reads. This protects the body,
+    // not the prefix/index; replay would still need the original readable body.
+    CHECK(!nvn_submit_capture_fences(&handle,1));
+    nvn_submit_prepare(&handle,1);
+    uint64_t queued=0;nvn_submit_prepare_async(&handle,&queued,1);CHECK(queued==handle);
+    CHECK(!nvn_submit_capture_fences(&handle,1));
+    DWORD ignored;CHECK(VirtualProtect(protected_page,page,old,&ignored));
+    const op_hdr *h=(const op_hdr *)(uintptr_t)(handle+8);NvnOpScratch scratch;
+    const p_bind_handles *b=nvn_op_normalize(h,&scratch);CHECK(b&&b->h[0]==0&&!b->src&&b->n==1);
+    replayed=nvn_submit_count();retire(&command,control,sizeof control);
+    CHECK(!stats().copies&&!stats().zombies);CALL(nvnCommandBufferFinalize,U(&command));
+}
+static void inlined_deferred_submission(void) {
+    NVNcommandBuffer command[2];uint8_t control[2][64];uint64_t source=11,handles[2];
+    for(unsigned i=0;i<2;i++)initialize(&command[i],control[i],sizeof control[i]);
+    CALL(nvnCommandBufferBeginRecording,U(&command[0]));
+    CALL(nvnCommandBufferBindTexturesDeferred,U(&command[0]),4,7,1,U(&source));
+    handles[0]=CALL(nvnCommandBufferEndRecording,U(&command[0]));
+    CALL(nvnCommandBufferBeginRecording,U(&command[1]));
+    CALL(nvnCommandBufferCallCommands,U(&command[1]),1,U(handles));
+    handles[1]=CALL(nvnCommandBufferEndRecording,U(&command[1]));
+    retire(&command[0],control[0],sizeof control[0]);CHECK(!nvn_handle_live(handles[0]));
+    for(unsigned round=0;round<3;round++){
+        source=44+round;nvn_submit_prepare(&handles[1],1);
+        const p_bind_handles *b=(const p_bind_handles*)(uintptr_t)(handles[1]+16);
+        CHECK(b->src==U(&source)&&b->h[0]==source&&b->n==1);
+    }
+    replayed=nvn_submit_count();retire(&command[1],control[1],sizeof control[1]);
+    CHECK(!stats().copies&&!stats().zombies);
+    for(unsigned i=0;i<2;i++)CALL(nvnCommandBufferFinalize,U(&command[i]));
+}
+static void buffer_records(void) {
+    NVNcommandBuffer command;uint8_t control[64];initialize(&command,control,sizeof control);
+    NVNbufferRange ranges[3]={{0,0},{UINT64_MAX-7,16},{UINT64_C(0x200000000),UINT64_C(0x900000000)}};
+    CALL(nvnCommandBufferBeginRecording,U(&command));
+    CALL(nvnCommandBufferBindUniformBuffer,U(&command),4,7,UINT64_C(0x123456789abcdef0),65536);
+    CALL(nvnCommandBufferBindStorageBuffer,U(&command),5,31,UINT64_C(0x200000000),UINT64_C(0x100000000));
+    CALL(nvnCommandBufferBindUniformBuffers,U(&command),0,1,3,U(ranges));
+    CALL(nvnCommandBufferBindUniformBuffer,U(&command),UINT64_MAX,0,0,4);
+    CALL(nvnCommandBufferBindVertexBuffer,U(&command),15,UINT64_MAX-31,UINT32_MAX);
+    uint64_t handle=CALL(nvnCommandBufferEndRecording,U(&command));
+    const p_bind_buf expected[]={{4,7,UINT64_C(0x123456789abcdef0),65536},{5,31,UINT64_C(0x200000000),UINT64_C(0x100000000)},
+        {0,1,0,0},{0,2,UINT64_MAX-7,16},{0,3,UINT64_C(0x200000000),UINT64_C(0x900000000)},{-1,0,0,4}};
+    const uint32_t sizes[]={24,32,24,24,32,32};const uint8_t *cursor=(const uint8_t*)(uintptr_t)(handle+8);
+    memset(ranges,0,sizeof ranges);
+    for(unsigned i=0;i<6;i++){
+        const op_hdr *h=(const op_hdr*)cursor;NvnOpScratch scratch;
+        CHECK(h->op==(i==1?OP_BIND_SSBO:OP_BIND_UBO)&&h->size==sizes[i]);
+        const p_bind_buf *b=nvn_op_normalize(h,&scratch);CHECK(b&&!memcmp(b,&expected[i],sizeof *b));cursor+=h->size;
+    }
+    const op_hdr *vertex=(const op_hdr*)cursor;NvnOpScratch scratch;
+    const p_bind_vbuf *v=nvn_op_normalize(vertex,&scratch);
+    CHECK(vertex->op==OP_BIND_VBUF&&vertex->size==24&&v&&v->first==15&&v->n==1);
+    CHECK(v->r[0].address==UINT64_MAX-31&&v->r[0].size==UINT32_MAX);cursor+=vertex->size;
+    CHECK(((const op_hdr*)cursor)->op==OP_END&&nvn_handle_bytes(handle)==208);
+    CHECK(((cmd_t*)&command)->hw_used==144);
+    retire(&command,control,sizeof control);CHECK(!stats().copies);CALL(nvnCommandBufferFinalize,U(&command));
+}
+static void recorder_reinit_accounting(void) {
+    NVNcommandBuffer original,copy;uint8_t control[2][64];initialize(&original,control[0],64);record(&original);
+    CHECK(stats().record_buffers==1&&stats().record_bytes==65536);
+    memcpy(&copy,&original,sizeof copy);
+    CALL(nvnCommandBufferInitialize,U(&copy),0); // stale template bytes do not own the original allocation
+    CHECK(stats().record_buffers==1&&stats().record_bytes==65536&&stats().record_reinits==1);
+    CALL(nvnCommandBufferAddCommandMemory,U(&copy),0,0,65536);retire(&copy,control[1],64);record(&copy);
+    CHECK(stats().record_buffers==2&&stats().record_bytes==131072&&stats().record_peak_bytes==131072);
+    retire(&original,control[0],64);retire(&copy,control[1],64);
+    CALL(nvnCommandBufferFinalize,U(&copy));CHECK(stats().record_buffers==1&&stats().record_bytes==65536);
+    CALL(nvnCommandBufferFinalize,U(&original));CHECK(!stats().record_buffers&&!stats().record_bytes);
+}
+static void indexed_records(void) {
+    NVNcommandBuffer command;uint8_t control[64];initialize(&command,control,sizeof control);
+    CALL(nvnCommandBufferBeginRecording,U(&command));uint64_t address=UINT64_C(0x123456789abcdef0);
+    CALL(nvnCommandBufferDrawElements,U(&command),4,1,3,address);
+    CALL(nvnCommandBufferDrawElementsBaseVertex,U(&command),4,1,3,address,UINT64_MAX);
+    CALL(nvnCommandBufferDrawElementsInstanced,U(&command),4,1,3,address,(uint64_t)-4,0,2);
+    CALL(nvnCommandBufferDrawElementsInstanced,U(&command),4,1,3,address,(uint64_t)-4,7,2);
+    uint64_t handle=CALL(nvnCommandBufferEndRecording,U(&command));const uint8_t *cursor=(const uint8_t*)(uintptr_t)(handle+8);
+    const uint32_t sizes[]={24,32,32,40};const int bases[]={0,-1,-4,-4};
+    for(unsigned i=0;i<4;i++){
+        const op_hdr *h=(const op_hdr*)cursor;NvnOpScratch scratch;const p_draw_idx *r=nvn_op_normalize(h,&scratch);
+        CHECK(h->op==OP_DRAW_IDX&&h->size==sizes[i]&&r&&r->prim==4&&r->itype==1&&r->count==3);
+        CHECK(r->ibuf==address&&r->base_vertex==bases[i]&&r->base_instance==(i==3?7:0)&&r->instances==(i>=2?2:1));cursor+=h->size;
+    }
+    CHECK(((const op_hdr*)cursor)->op==OP_END&&nvn_handle_bytes(handle)==144&&((cmd_t*)&command)->hw_used==180);
+    retire(&command,control,sizeof control);CALL(nvnCommandBufferFinalize,U(&command));
 }
 int main(int argc,char **argv) {
     CHECK(argc==2);const char *mode=argv[1];
     if(!strcmp(mode,"packed"))packed_records();
+    else if(!strcmp(mode,"immediate-submit"))immediate_submission();
+    else if(!strcmp(mode,"inlined-deferred"))inlined_deferred_submission();
+    else if(!strcmp(mode,"buffer-records"))buffer_records();
+    else if(!strcmp(mode,"reinit-accounting"))recorder_reinit_accounting();
+    else if(!strcmp(mode,"indexed-records"))indexed_records();
     else if(!strcmp(mode,"recycling"))bounded_recycling();
     else if(!strcmp(mode,"initial"))initial_callback();
     else if(!strcmp(mode,"boundary"))exact_boundary();
@@ -200,5 +336,7 @@ int main(int argc,char **argv) {
         }else CHECK(0);
         CHECK(0); // every failure mode must stop visibly before inventing a handle or reusing the first slot
     }
+    CHECK(!stats().record_buffers&&!stats().record_bytes&&stats().record_peak_bytes>=65536);
+    CHECK(stats().record_reinits==(!strcmp(mode,"reinit-accounting")?1u:0u));
     puts("control-memory lifetime checks passed");return 0;
 }

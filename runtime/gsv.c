@@ -193,7 +193,8 @@ static void chat_handler(IpcSession *s, const IpcRequest *q, IpcResponse *r) {
 static void user_request(IpcSession *s, const IpcRequest *q, IpcResponse *r) {
     GsvUser *state = s->state;
     if (q->type < 16 || !plain(q)) ipc_unimplemented(s, q);
-    rt_log("gsv: TIPC %u (data %u, copy %u)", q->cmd, q->data_size, q->ncopy);
+    if (q->cmd != 1111 || (rt_trace & RT_TRACE_IPC))
+        rt_log("gsv: TIPC %u (data %u, copy %u)", q->cmd, q->data_size, q->ncopy);
     switch (q->cmd) {
     case 4: { // BootWithRemoteMemory: process handle, aruid + 5 u64 fields
         if (state->booted || q->ncopy != 1) ipc_unimplemented(s, q);
@@ -213,8 +214,9 @@ static void user_request(IpcSession *s, const IpcRequest *q, IpcResponse *r) {
     }
     case 1111: { // SetGraphicsFrameLengthMode: explicit experimental host-only record
         uint32_t wire = IPC_ARG(q, uint32_t, 0);
-        rt_log("gsv: GraphicsFrameLengthMode request wire=%#x (%u), context=%d",
-               wire, wire, state->context);
+        int report = (rt_trace & RT_TRACE_IPC) || !state->graphics_frame_policy_set || state->graphics_frame_policy != wire;
+        if (report) rt_log("gsv: GraphicsFrameLengthMode request wire=%#x (%u), context=%d",
+                           wire, wire, state->context);
         // SDK 46177610... sdk+0x411660 maps enum 0..3 through +0xae5660
         // to these opaque words. Client code establishes no duration unit or
         // server-side scheduling semantics. Never interpret them as FPS/ns.
@@ -228,8 +230,8 @@ static void user_request(IpcSession *s, const IpcRequest *q, IpcResponse *r) {
             ipc_unimplemented(s, q);
         state->graphics_frame_policy = wire;
         state->graphics_frame_policy_set = 1;
-        rt_log("gsv: EXPERIMENTAL local frame-policy request %#x recorded only; console GPU scheduling is NOT "
-               "emulated; NVN swap interval still controls host pacing", wire);
+        if (report) rt_log("gsv: EXPERIMENTAL local frame-policy request %#x recorded only; console GPU scheduling is NOT "
+                           "emulated; NVN swap interval still controls host pacing", wire);
         return;
     }
     case 11: // SetCurrentProcessHandle

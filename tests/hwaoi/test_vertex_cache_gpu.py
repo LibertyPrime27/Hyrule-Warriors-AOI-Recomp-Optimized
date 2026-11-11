@@ -7,7 +7,7 @@ sys.path.insert(0,str(ROOT/'tests/hwaoi'))
 import test_gpu_quads as harness
 CC=Path(os.environ.get("HWAOI_TOOLS", "F:") + '/llvm-mingw/bin/clang.exe');DEPS=Path(os.environ.get('HWAOI_TEST_DEPS') or 'F:/TotKDependencies/runtime/deps')   # HWAOI_TEST_DEPS: a deps tree with include/ and lib/
 
-def source():
+def real_vma_harness():
     base=harness.source(False)
     support=base[base.index('#include <stdio.h>'):base.index('static unsigned validation_errors;')]
     # Exercise the real allocator, including its physical block limit and the
@@ -24,6 +24,11 @@ def source():
  VkQueue queue;''')
     # Reuse the independent Vulkan allocation/validation harness; the production
     # module below performs every cache decision and records every snapshot.
+    return support,setup
+
+
+def source():
+    support,setup=real_vma_harness()
     module=(ROOT/'runtime/vk_vertex_cache.c').read_text(encoding='utf-8')
     module=module.replace('#include "vk_vertex_cache.h"','#include "vk_vertex_cache.h"\n#undef vkCmdCopyBuffer\n#undef vkCmdPipelineBarrier2\n#undef vkCmdUpdateBuffer')
     extra=r'''
@@ -161,11 +166,71 @@ static void full_barrier(VkCommandBuffer cb){VkExec ex={.cb=cb};vk_exec_barrier(
     setup=setup.replace('VkCommandPool pool;', 'VkCommandPool command_pool;').replace('&pool)', '&command_pool)').replace('.commandPool=pool', '.commandPool=command_pool')
     return '#include "platform/platform.h"\n'+module+support+extra+setup+main
 
+
+def staging_source():
+    sys.path.insert(0,str(ROOT/'tests'))
+    from nvn2_compute_c0_test import function
+    import re
+    memory=(ROOT/'runtime/vk_memory.c').read_text(encoding='utf-8')
+    constants='\n'.join(re.findall(r'^#define STG_(?:BLOCK|MIN_BLOCKS) .+$',memory,re.M))
+    support,setup=real_vma_harness()
+    extra=r'''
+static VmaPool stg_pool;static int stg_pool_tried;
+static volatile int64_t up_bytes;static PlatOnce cmd_once;static PlatRMutex cmd_lock;
+typedef struct {VkBuffer buf;VmaAllocation alloc;} Staging;
+static struct{Staging *stg;int nstg,cap;}open_b;
+static void cmd_init(void *arg){(void)arg;}
+void plat_once(PlatOnce *o,void(*fn)(void*),void *arg){(void)o;fn(arg);}
+void plat_rmutex_lock(PlatRMutex *m){(void)m;}
+void plat_rmutex_unlock(PlatRMutex *m){(void)m;}
+static void grow(void **p,int *cap,size_t n){(void)p;(void)cap;(void)n;CHECK(0);}
+'''
+    main=r'''
+ (void)invalid;vmaDestroyAllocator(context.vma);
+ for(unsigned compact=0;compact<2;compact++){
+  context.vma_block_size=(compact?128ull:256ull)<<20;
+  VmaAllocatorCreateInfo ai={.instance=context.instance,.physicalDevice=context.phys,.device=context.device,
+   .vulkanApiVersion=VK_API_VERSION_1_2,.preferredLargeHeapBlockSize=context.vma_block_size};
+  VK(vmaCreateAllocator(&ai,&context.vma));
+  const VkDeviceSize size=3200*1024;enum{N=24};
+  VkBuffer stage[N];VmaAllocation allocations[N],read_alloc;void *maps[N],*read_map;
+  VkBuffer read=test_buffer(size*N,VK_BUFFER_USAGE_TRANSFER_DST_BIT,&read_alloc,&read_map);
+  VK(vkResetCommandBuffer(cb,0));VkCommandBufferBeginInfo begin={.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};VK(vkBeginCommandBuffer(cb,&begin));
+  for(unsigned i=0;i<N;i++){
+   maps[i]=vk_staging(size,&stage[i],&allocations[i]);CHECK(maps[i]);
+   for(unsigned j=0;j<size/4;j++)((uint32_t*)maps[i])[j]=(j*0x9e3779b9u)^i;
+   VK(vmaFlushAllocation(context.vma,allocations[i],0,VK_WHOLE_SIZE));
+   VkBufferCopy copy={0,size*i,size};vkCmdCopyBuffer(cb,stage[i],read,1,&copy);
+  }
+  VkMemoryBarrier2 host={.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,.srcStageMask=VK_PIPELINE_STAGE_2_COPY_BIT,
+   .srcAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT,.dstStageMask=VK_PIPELINE_STAGE_2_HOST_BIT,.dstAccessMask=VK_ACCESS_2_HOST_READ_BIT};
+  VkDependencyInfo di={.sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO,.memoryBarrierCount=1,.pMemoryBarriers=&host};vkCmdPipelineBarrier2(cb,&di);
+  VK(vkEndCommandBuffer(cb));VkSubmitInfo submit={.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO,.commandBufferCount=1,.pCommandBuffers=&cb};
+  VK(vkQueueSubmit(queue,1,&submit,VK_NULL_HANDLE));VK(vkQueueWaitIdle(queue));
+  for(unsigned i=0;i<N;i++){CHECK(!memcmp((uint8_t*)read_map+size*i,maps[i],size));vmaDestroyBuffer(context.vma,stage[i],allocations[i]);}
+  VmaStatistics stats;vmaGetPoolStatistics(context.vma,stg_pool,&stats);
+  CHECK(!stats.allocationCount&&stats.blockBytes==((compact?32ull:128ull)<<20));
+  // Oversized staging allocations must still succeed outside the small pool.
+  VkBuffer large;VmaAllocation large_alloc;CHECK(vk_staging(64ull<<20,&large,&large_alloc));
+  vmaGetPoolStatistics(context.vma,stg_pool,&stats);CHECK(!stats.allocationCount);
+  vmaDestroyBuffer(context.vma,large,large_alloc);vmaDestroyBuffer(context.vma,read,read_alloc);
+  vmaDestroyPool(context.vma,stg_pool);stg_pool=NULL;stg_pool_tried=0;
+  VmaTotalStatistics total;vmaCalculateStatistics(context.vma,&total);CHECK(!total.total.statistics.allocationCount);
+  vmaDestroyAllocator(context.vma);
+ }
+ vkDestroyCommandPool(context.device,pool,NULL);vkDestroyDevice(context.device,NULL);
+ PFN_vkDestroyDebugUtilsMessengerEXT destroy=(PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(context.instance,"vkDestroyDebugUtilsMessengerEXT");
+ destroy(context.instance,messenger,NULL);vkDestroyInstance(context.instance,NULL);CHECK(!validation_errors);
+ puts("staging pools: byte equality, burst retirement and large fallback; no validation errors");return 0;
+}
+'''
+    return '#include "platform/platform.h"\n#include "vk_exec.h"\n#undef vkCmdCopyBuffer\n#undef vkCmdPipelineBarrier2\n'+support+constants+extra+function(memory,'void *vk_staging(')+setup+main
+
 @unittest.skipUnless(os.name=='nt' and CC.is_file(),'Windows Vulkan required')
 class VertexCacheGpuTests(unittest.TestCase):
-    def test_byte_equality_mutations_lifetime_and_eviction(self):
+    def run_fixture(self,code):
         with tempfile.TemporaryDirectory(prefix='hwaoi-vertex-cache-') as temp:
-            folder=Path(temp);path=folder/'fixture.c';path.write_text(source(),encoding='utf-8');exe=folder/'fixture.exe'
+            folder=Path(temp);path=folder/'fixture.c';path.write_text(code,encoding='utf-8');exe=folder/'fixture.exe'
             allocator=folder/'vma.o'
             result=subprocess.run([str(CC.with_name('clang++.exe')),'-O2','-DNDEBUG','-I',str(DEPS/'include'),
                 '-I',str(DEPS/'include/vma'),'-c',str(ROOT/'runtime/vk_vma.cpp'),'-o',str(allocator)],
@@ -180,5 +245,48 @@ class VertexCacheGpuTests(unittest.TestCase):
             result=subprocess.run([str(exe),'good'],cwd=folder,env=env,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=30)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             self.assertIn('no validation errors',result.stdout)
+
+    def test_byte_equality_mutations_lifetime_and_eviction(self):
+        self.run_fixture(source())
+
+    def test_staging_burst_reclaims_memory_without_changing_bytes(self):
+        self.run_fixture(staging_source())
+
+    def test_smaller_blocks_keep_the_previous_headroom_margin(self):
+        sys.path.insert(0,str(ROOT/'tests'))
+        from nvn2_compute_c0_test import function
+        text=(ROOT/'runtime/vk_headroom.c').read_text(encoding='utf-8')
+        code=r'''
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "vk.h"
+#define HR_SMALL_HEAP (1ull<<30)
+#define CHECK(x) do{if(!(x)){fprintf(stderr,"line %d: %s\n",__LINE__,#x);exit(1);}}while(0)
+static VmaBudget budget;
+void vmaGetHeapBudgets(VmaAllocator a,VmaBudget *out){(void)a;memset(out,0,sizeof(VmaBudget)*VK_MAX_MEMORY_HEAPS);out[0]=budget;}
+'''+function(text,'static VkDeviceSize block_size(')+function(text,'static int room(')+r'''
+int main(void){
+ VkCtx c={0};c.mem_props.memoryHeapCount=1;c.mem_props.memoryTypeCount=1;
+ c.mem_props.memoryHeaps[0].size=8ull<<30;
+ for(unsigned b=1;b<=12;b++)for(unsigned u=0;u<=12*64;u++){
+  budget.budget=(uint64_t)b<<30;budget.usage=(uint64_t)u<<24;
+  c.vma_block_size=256ull<<20;int previous=room(&c,0,block_size(&c,0));
+  c.vma_block_size=128ull<<20;CHECK(!room(&c,0,block_size(&c,0))||previous);
+ }
+ c.mem_props.memoryHeaps[0].size=256ull<<20;budget.budget=256ull<<20;budget.usage=64ull<<20;
+ CHECK(block_size(&c,0)==32ull<<20&&room(&c,0,block_size(&c,0)));
+ budget.budget=0;CHECK(!room(&c,0,block_size(&c,0)));
+ puts("headroom: smaller blocks never relax the VRAM-pressure guard");return 0;
+}
+'''
+        with tempfile.TemporaryDirectory(prefix='hwaoi-headroom-') as temp:
+            path=Path(temp)/'fixture.c';path.write_text(code,encoding='utf-8');exe=Path(temp)/'fixture.exe'
+            built=subprocess.run([str(CC),'-O2','-Wall','-Wextra','-Werror','-I',str(ROOT/'runtime'),
+                '-I',str(DEPS/'include'),'-I',str(DEPS/'include/vma'),str(path),'-o',str(exe)],
+                capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=30)
+            self.assertEqual(built.returncode,0,built.stdout+built.stderr)
+            result=subprocess.run([str(exe)],capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=10)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
 if __name__=='__main__':unittest.main()

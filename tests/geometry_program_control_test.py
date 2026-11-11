@@ -42,6 +42,12 @@ def source(control="fixed"):
 #endif
 #include "gfx.h"
 #include "nvn_geometry_control.h"
+#include "nvn_program_source.h"
+// This control-lifetime fixture isolates the uncompressed registration path.
+// The source-cache fixture executes real compression and concurrent expansion.
+size_t nvn_program_source_pack(prog_t *p,size_t n) {(void)p;(void)n;return 0;}
+const uint8_t *nvn_program_source(const uint8_t *p) {return p;}
+void nvn_program_source_release(const prog_t *p) {(void)p;}
 static unsigned checks, failures, releases, allocations, frees, fail_alloc, lowers, dumps;
 #define CHECK(c,m) do { checks++; if (!(c)) { failures++; fprintf(stderr,"FAIL: %s\n",m); } } while (0)
 typedef struct { void *p; size_t n; int live; } Block;

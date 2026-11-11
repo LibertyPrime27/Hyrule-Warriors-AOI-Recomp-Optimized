@@ -15,6 +15,14 @@
 
 The game's ARM64 code is translated to C ahead of time and compiled together with a C/C++ runtime. An NVN 2 implementation handles graphics and translates the game's Ampere shaders to SPIR-V for Vulkan.
 
+## Project lead — [Alano6678](https://github.com/Alano6678)
+
+HWAoI adaptation, runtime and renderer development, Windows compiler distribution, memory optimization, testing, and project maintenance.
+
+## Major contributor — [LibertyPrime27](https://github.com/LibertyPrime27)
+
+Combat performance and QUADS batching, buffer-texture lighting, first-load stutter reduction, update and DLC support, two-player controls, and compiler/settings improvements. Their work is included through [#9](https://github.com/Alano6678/hwaoi-recomp/pull/9), [#10](https://github.com/Alano6678/hwaoi-recomp/pull/10), and [#11](https://github.com/Alano6678/hwaoi-recomp/pull/11).
+
 > [!NOTE]
 > Bring your own matching game files. No ROMs, keys, firmware, generated game code, shader payloads, game artwork or game-derived executables are distributed here. Recompilation happens locally on your PC.
 
@@ -119,6 +127,14 @@ The 30 / 60 / 90 / 120 FPS settings are available, both in the compiler (**Allow
 
 **Current version: 1.0.5 (November 11, 2026).** Version 1.0.5 makes the menu key rebindable (Esc by default, any controller button you choose) and adds Leave unbound for clearing a binding. Version 1.0.4 removed the multi-second freeze when a scene loads for the first time (now a short hitch of about 0.9 s on the test PC). Version 1.0.3 added two-player co-op with per-player input devices, controllers and bindings, plus a live docked/handheld switch. The game boots, plays the opening movies and reaches outdoor exploration and combat. A complete playthrough has not been verified.
 
+## Current priorities
+
+1. **FPS++ timing:** keep walking, running, animation, gameplay timers and save behavior consistent at 30, 60, 90 and 120 FPS. A higher frame cap alone does not complete this work.
+2. **Resolution and UI:** preserve the interface's relative size and layout at 720p, 1080p, 1440p and 4K while rendering the scene at the selected resolution.
+3. **Sustained performance:** reduce crowded-combat cost and first-use stalls without dropping required draws or changing game logic.
+
+## Feature status
+
 | | Part | Progress |
 | --- | --- | --- |
 | ✅ | Static recompiler | All three guest modules generate, compile and link into a native Windows executable. |
@@ -164,6 +180,12 @@ python tools/hwaoi.py verify
 Resource preparation, C generation, compilation/linking and launching are separate steps (`prepare-romfs`, `generate`, `build`, `launch`). The frame-rate profile is generated with `generate --rate-unlock` and enabled at launch by `HWAOI_RATE_UNLOCK=1`. `HWAOI_RATE_DIAG=1` logs scheduler-step totals against wall time.
 
 In game, press **Esc** for settings, **F10** to cycle the performance overlay and **F11** for fullscreen. Resolution changes need a restart.
+
+For Windows source-build testing, `HWAOI_LAZY_HEAP=1` enables the demand-commit heap experiment. It changes when host backing is allocated, while keeping the game's logical heap size unchanged; additional pages are committed when needed. It is not yet a validated 16 GiB system preset.
+
+Lossless program-source compression is enabled in current HWAoI source builds. `HWAOI_SOURCE_COMPRESS=0` disables it for comparison or troubleshooting; a restart is required.
+
+Asynchronous replay can be tested with `HWAOI_REPLAY_ASYNC=1`. A same-executable pair in the stationary opening field, with 1080p and a 120 FPS target, measured median rates of **75.5 FPS synchronously and 86.3 FPS asynchronously** on the test PC with power-saving enabled. It remains disabled by default pending broader scene and synchronization checks; the gameplay-speed caveat above still applies.
 
 ## Testing and reports
 

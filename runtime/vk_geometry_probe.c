@@ -191,17 +191,19 @@ static void gp_prefix(uint8_t *memory, void *control, int indirect) {
     // argument records during a subsequent consumer/reference draw.
     GP_CALL(nvnCommandBufferBindProgram, GP_U(&gp_command), GP_U(indirect ? &gp_plain_program : &gp_full_program),
         NVN_SHADER_STAGE_ALL_GRAPHICS_BITS);
-    NVNvertexAttribState attr[2];
-    NVNvertexStreamState stream;
+    NVNvertexAttribState attr[16] = {0};
+    NVNvertexStreamState stream[16] = {0};
     for (unsigned i = 0; i < 2; i++) {
         GP_CALL(nvnVertexAttribStateSetDefaults, GP_U(&attr[i]));
         GP_CALL(nvnVertexAttribStateSetFormat, GP_U(&attr[i]), NVN_FORMAT_RGBA32F, i * 16);
         GP_CALL(nvnVertexAttribStateSetStreamIndex, GP_U(&attr[i]), 0);
     }
-    GP_CALL(nvnVertexStreamStateSetDefaults, GP_U(&stream));
-    GP_CALL(nvnVertexStreamStateSetStride, GP_U(&stream), 32);
-    GP_CALL(nvnCommandBufferBindVertexAttribState, GP_U(&gp_command), 2, GP_U(attr));
-    GP_CALL(nvnCommandBufferBindVertexStreamState, GP_U(&gp_command), 1, GP_U(&stream));
+    GP_CALL(nvnVertexStreamStateSetDefaults, GP_U(&stream[0]));
+    GP_CALL(nvnVertexStreamStateSetStride, GP_U(&stream[0]), 32);
+    // Clear all unused slots explicitly. This also exercises the production
+    // sparse-array record path before checking the shader's GPU result.
+    GP_CALL(nvnCommandBufferBindVertexAttribState, GP_U(&gp_command), 16, GP_U(attr));
+    GP_CALL(nvnCommandBufferBindVertexStreamState, GP_U(&gp_command), 16, GP_U(stream));
     GP_CALL(nvnCommandBufferBindVertexBuffer, GP_U(&gp_command), 0,
         GP_U(memory + GP_VERTEX + (indirect ? 0 : gp_passthrough ? 96 : 192)),
         indirect || gp_passthrough ? 96 : 32);
@@ -236,6 +238,37 @@ static int gp_pixels(uint32_t pixels[GP_WIDTH * GP_HEIGHT], uint32_t color, int 
 // Both possible argument records are bounded: reset draws no indices, and the already validated original GS
 // writes exactly three owned indices/one instance. Reset completion is checked before the combined recording;
 // there is no CPU readback or wait between its producer and consumer. The normal NVN barrier supplies ordering.
+static int gp_indexed_direct(uint8_t *memory, void *control, int expected_orientation) {
+    int ok = 0;
+    // {1,2,3} with base vertex -1 must fetch exactly the same three owned
+    // vertices as {0,1,2}. Both index arrays stay inside the authored pool.
+    static const uint16_t shifted[3] = {1, 2, 3};
+    memcpy(memory + GP_INDEX + 16, shifted, sizeof shifted);
+    GP_CALL(nvnMemoryPoolFlushMappedRange, GP_U(&gp_memory_pool), GP_INDEX + 16, sizeof shifted);
+    for (unsigned mode = 0; mode < 4; mode++) {
+        gp_prefix(memory, control, 1);
+        if (!mode)
+            GP_CALL(nvnCommandBufferDrawElements, GP_U(&gp_command), NVN_DRAW_PRIMITIVE_TRIANGLES,
+                    NVN_INDEX_TYPE_UNSIGNED_SHORT, 3, GP_U(memory + GP_INDEX));
+        else if (mode == 1)
+            GP_CALL(nvnCommandBufferDrawElementsBaseVertex, GP_U(&gp_command), NVN_DRAW_PRIMITIVE_TRIANGLES,
+                    NVN_INDEX_TYPE_UNSIGNED_SHORT, 3, GP_U(memory + GP_INDEX + 16), UINT64_MAX);
+        else
+            GP_CALL(nvnCommandBufferDrawElementsInstanced, GP_U(&gp_command), NVN_DRAW_PRIMITIVE_TRIANGLES,
+                    NVN_INDEX_TYPE_UNSIGNED_SHORT, 3, GP_U(memory + GP_INDEX + 16), UINT64_MAX,
+                    mode == 3 ? 7 : 0, 2);
+        GP_REQUIRE(gp_submit(), "direct indexed reference completion");
+        uint32_t pixels[GP_WIDTH * GP_HEIGHT]; int orientation;
+        GP_REQUIRE(gp_pixels(pixels, 0xff00ff00u, &orientation),
+                   "direct indexed reference pixels (negative base and instances)");
+        GP_REQUIRE(orientation == expected_orientation, "direct indexed reference coverage");
+    }
+    puts("probe-vkgeometry: direct, negative-base and instanced/fallback indexed pixels verified");
+    ok = 1;
+done:
+    return ok;
+}
+
 static int gp_ordered(uint8_t *memory, void *control, uint64_t record_address,
                       const uint8_t verified[256], int expected_orientation) {
     int ok = 0;
@@ -488,6 +521,7 @@ static int gp_run(int passthrough, int ordered) {
         uint8_t after[256];
         GP_REQUIRE(gp_read_gpu(GP_U(memory + GP_GUARD), after, sizeof after), "post-indirect GPU record readback");
         GP_REQUIRE(!memcmp(guard, after, sizeof guard), "indirect consumption preserves argument record/canaries");
+        GP_REQUIRE(gp_indexed_direct(memory, control, second_orientation), "direct indexed reference round");
         if (ordered) GP_REQUIRE(gp_ordered(memory, control, record_address, guard, first_orientation), "same-submission ordering round");
         const char *arrays = cfg_get("HWAOI_PROBE_ARRAYS_INDIRECT");
         if (arrays && !strcmp(arrays,"1")) GP_REQUIRE(gp_arrays_indirect(memory,control),"array indirect fixture");

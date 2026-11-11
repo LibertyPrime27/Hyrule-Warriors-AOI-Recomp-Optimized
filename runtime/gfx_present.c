@@ -820,6 +820,11 @@ void gfx_window_release_vk(void) {
         vkDeviceWaitIdle(c->device);
         vk_queue_unlock();
         g_flip_on = 0;   // its blit is done (device idle); the swapchain goes away unpresented
+        if (g_ts_pool) vkDestroyQueryPool(c->device, g_ts_pool, NULL);
+        g_ts_pool = VK_NULL_HANDLE;
+        g_ts_state = 0;
+        g_ts_period = 0;
+        memset(g_ts_on, 0, sizeof g_ts_on);
         menu_vk_release();
         vk_fsr_release();
         vk_color_release();

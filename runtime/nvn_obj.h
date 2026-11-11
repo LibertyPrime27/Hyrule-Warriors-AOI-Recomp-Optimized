@@ -182,3 +182,200 @@ typedef struct { const tex_t *src, *dst; view_t sv, dv; uint8_t has_sv, has_dv; 
 typedef struct { const tex_t *tex; view_t view; uint8_t has_view, is_uint; NVNcopyRegion r; int32_t mask; union { float f[4]; uint32_t u[4]; } c; } p_clear_tex;
 typedef struct { int64_t stride; } p_copy_stride;
 typedef struct { float rgba[4]; } p_blend_color;
+
+// Lossless host-record encoding. Guest NVN object layouts stay unchanged.
+// Packed arrays retain their logical length: omitted entries restore zeros.
+#define NVN_RECORD_PACKED UINT32_C(0x80000000)
+typedef union { p_set_rt rt; p_bind_vattr attr; p_bind_vstream stream; p_bind_vbuf buffer; p_bind_handles handles; p_bind_buf range; p_draw_idx indexed; } NvnOpScratch;
+
+// Indexed draws commonly have base vertex/instance zero and one instance. Keep
+// signed optional values verbatim, including zero instances, and retain the
+// legacy form when a tagged form would not save a full aligned word.
+static inline size_t nvn_indexed_pack(void *destination, const p_draw_idx *r) {
+    int32_t values[3] = {r->base_vertex, r->base_instance, r->instances};
+    uint32_t mask = (values[0] != 0 ? 1u : 0) | (values[1] != 0 ? 2u : 0) | (values[2] != 1 ? 4u : 0);
+    unsigned count = !!(mask & 1) + !!(mask & 2) + !!(mask & 4);
+    size_t size = 16 + count * 4;
+    int compact = r->prim >= 0 && r->prim <= 255 && r->itype >= 0 && r->itype <= 255 && count < 3;
+    if (!compact) { if (destination) memcpy(destination, r, sizeof *r); return sizeof *r; }
+    if (!destination) return size;
+    uint8_t *p = destination;
+    uint32_t flags = NVN_RECORD_PACKED | (uint32_t)r->prim | ((uint32_t)r->itype << 8) | (mask << 16);
+    memcpy(p, &flags, 4); memcpy(p + 4, &r->count, 4); memcpy(p + 8, &r->ibuf, 8); p += 16;
+    for (unsigned i = 0; i < 3; i++) if (mask & (1u << i)) { memcpy(p, &values[i], 4); p += 4; }
+    return size;
+}
+
+// Short ranges keep the full address; stage/index share a tagged word and the
+// byte length fits in 32 bits. Other inputs retain the legacy 64-bit length.
+static inline size_t nvn_buffer_pack(void *destination, const p_bind_buf *r) {
+    int compact = r->stage >= 0 && r->stage <= 5 && r->index >= 0 && r->index <= 255 && r->size <= UINT32_MAX;
+    if (destination) {
+        if (compact) {
+            uint8_t *p = destination;
+            uint32_t flags = NVN_RECORD_PACKED | (uint32_t)r->stage | ((uint32_t)r->index << 3), size = (uint32_t)r->size;
+            memcpy(p, &flags, 4); memcpy(p + 4, &size, 4); memcpy(p + 8, &r->addr, 8);
+        } else memcpy(destination, r, sizeof *r);
+    }
+    return compact ? 16 : sizeof *r;
+}
+
+// An immediate single handle needs no count, deferred source or padding. The
+// marker distinguishes it from a truncated legacy record; legacy arrays remain
+// unchanged, including arrays whose source must be reread on each submission.
+static inline size_t nvn_handle_pack_one(void *destination, int stage, int first, uint64_t handle) {
+    if (stage < 0 || stage > 5) return 0;
+    if (destination) {
+        uint8_t *p = destination;
+        uint32_t flags = NVN_RECORD_PACKED | (uint32_t)stage;
+        memcpy(p, &flags, 4); memcpy(p + 4, &first, 4); memcpy(p + 8, &handle, 8);
+    }
+    return 16;
+}
+
+static inline size_t nvn_rt_pack(void *destination, const p_set_rt *r) {
+    if (r->n < 0 || r->n > 8) return 0;
+    uint32_t views = 0;
+    size_t size = 8 + sizeof r->depth + (size_t)r->n * sizeof r->color[0];
+    for (int i = 0; i < r->n; i++) if (r->has_cview[i]) views |= 1u << i, size += sizeof(view_t);
+    if (r->has_dview) size += sizeof(view_t);
+    if (!destination) return size;
+    uint8_t *p = destination;
+    uint32_t flags = NVN_RECORD_PACKED | (uint32_t)r->n | (views << 4) | (r->has_dview ? 1u << 12 : 0), zero = 0;
+    memcpy(p, &flags, 4); memcpy(p + 4, &zero, 4); memcpy(p + 8, &r->depth, sizeof r->depth);
+    p += 8 + sizeof r->depth;
+    if (r->n) memcpy(p, r->color, (size_t)r->n * sizeof r->color[0]);
+    p += (size_t)r->n * sizeof r->color[0];
+    for (int i = 0; i < r->n; i++) if (r->has_cview[i]) { memcpy(p, &r->cview[i], sizeof(view_t)); p += sizeof(view_t); }
+    if (r->has_dview) memcpy(p, &r->dview, sizeof(view_t));
+    return size;
+}
+
+static inline size_t nvn_array_pack(void *destination, int first, int n, const void *values, size_t item_size) {
+    if (first < 0 || first > 16 || n < 0 || n > 16 - first ||
+        (item_size != 4 && item_size != 8 && item_size != 16)) return 0;
+    if (item_size == sizeof(NVNbufferRange) && n == 1) {
+        NVNbufferRange range; memcpy(&range, values, sizeof range);
+        if (range.size <= UINT32_MAX) {
+            if (destination) {
+                uint8_t *p = destination;
+                uint32_t flags = NVN_RECORD_PACKED | (uint32_t)first, size = (uint32_t)range.size;
+                memcpy(p, &flags, 4); memcpy(p + 4, &size, 4); memcpy(p + 8, &range.address, 8);
+            }
+            return 16;
+        }
+    }
+    const uint8_t zero[16] = {0}, *src = values;
+    uint32_t present = 0;
+    unsigned count = 0;
+    for (int i = 0; i < n; i++) if (memcmp(src + (size_t)i * item_size, zero, item_size)) present |= 1u << i, count++;
+    size_t dense = 8 + (size_t)n * item_size, packed = 16 + (size_t)count * item_size;
+    int compact = ((packed + 7) & ~(size_t)7) < ((dense + 7) & ~(size_t)7);
+    size_t size = compact ? packed : dense;
+    if (!destination) return size;
+    uint8_t *p = destination;
+    uint32_t length = (uint32_t)n | (compact ? NVN_RECORD_PACKED : 0), reserved = 0;
+    memcpy(p, &first, 4); memcpy(p + 4, &length, 4);
+    if (!compact) { if (n) memcpy(p + 8, values, (size_t)n * item_size); return size; }
+    memcpy(p + 8, &present, 4); memcpy(p + 12, &reserved, 4); p += 16;
+    for (int i = 0; i < n; i++) if (present & (1u << i)) { memcpy(p, src + (size_t)i * item_size, item_size); p += item_size; }
+    return size;
+}
+
+// Returns the original legacy payload or a normalized scratch payload. A short
+// or inconsistent known record fails before any view/array element is read.
+static inline const void *nvn_op_normalize(const op_hdr *h, NvnOpScratch *scratch) {
+    if (h->size < 8 || (h->size & 7) || h->op >= OP_COUNT_) return NULL;
+    const uint8_t *p = (const uint8_t *)(h + 1);
+    size_t available = h->size - 8;
+    if (h->op == OP_DRAW_IDX) {
+        if (available >= sizeof(p_draw_idx)) return p;
+        if (available < 16) return NULL;
+        uint32_t flags; memcpy(&flags, p, 4);
+        if (!(flags & NVN_RECORD_PACKED) || (flags & ~(NVN_RECORD_PACKED | 0x7ffffu))) return NULL;
+        uint32_t mask = (flags >> 16) & 7;
+        unsigned count = !!(mask & 1) + !!(mask & 2) + !!(mask & 4);
+        if (available < 16 + count * 4) return NULL;
+        p_draw_idx *r = &scratch->indexed; memset(r, 0, sizeof *r);
+        r->prim = (int)(flags & 255); r->itype = (int)((flags >> 8) & 255); r->instances = 1;
+        memcpy(&r->count, p + 4, 4); memcpy(&r->ibuf, p + 8, 8); p += 16;
+        int32_t *values[3] = {&r->base_vertex, &r->base_instance, &r->instances};
+        for (unsigned i = 0; i < 3; i++) if (mask & (1u << i)) { memcpy(values[i], p, 4); p += 4; }
+        return r;
+    }
+    if (h->op == OP_BIND_UBO || h->op == OP_BIND_SSBO) {
+        if (available == 16) {
+            uint32_t flags, size; memcpy(&flags, p, 4); memcpy(&size, p + 4, 4);
+            if (!(flags & NVN_RECORD_PACKED) || (flags & ~(NVN_RECORD_PACKED | 0x7ffu)) || (flags & 7) > 5) return NULL;
+            p_bind_buf *r = &scratch->range;
+            r->stage = (int)(flags & 7); r->index = (int)((flags >> 3) & 255); r->size = size;
+            memcpy(&r->addr, p + 8, 8);
+            return r;
+        }
+        return available >= sizeof(p_bind_buf) ? p : NULL;
+    }
+    if (h->op == OP_BIND_TEX || h->op == OP_BIND_SAMP || h->op == OP_BIND_IMG) {
+        if (available == 16) {
+            uint32_t flags; memcpy(&flags, p, 4);
+            if (!(flags & NVN_RECORD_PACKED) || (flags & ~NVN_RECORD_PACKED) > 5) return NULL;
+            p_bind_handles *r = &scratch->handles;
+            memset(r, 0, offsetof(p_bind_handles, h) + sizeof r->h[0]);
+            r->stage = (int)(flags & ~NVN_RECORD_PACKED); r->n = 1;
+            memcpy(&r->first, p + 4, 4); memcpy(r->h, p + 8, 8);
+            return r;
+        }
+        if (available < offsetof(p_bind_handles, h)) return NULL;
+        int32_t n; memcpy(&n, p + offsetof(p_bind_handles, n), 4);
+        return n >= 0 && n <= 32 && available >= offsetof(p_bind_handles, h) + (size_t)n * 8 ? p : NULL;
+    }
+    if (h->op == OP_SET_RT) {
+        if (available < 4) return NULL;
+        uint32_t flags; memcpy(&flags, p, 4);
+        if (!(flags & NVN_RECORD_PACKED)) {
+            return available >= sizeof(p_set_rt) && flags <= 8 ? p : NULL;
+        }
+        unsigned n = flags & 15, views = (flags >> 4) & 255, depth = (flags >> 12) & 1;
+        if ((flags & ~(NVN_RECORD_PACKED | 0x1fffu)) || n > 8 || (views >> n) || available < 8 + sizeof(scratch->rt.depth)) return NULL;
+        uint32_t reserved; memcpy(&reserved, p + 4, 4); if (reserved) return NULL;
+        size_t need = 8 + sizeof(scratch->rt.depth) + n * sizeof(scratch->rt.color[0]) + depth * sizeof(view_t);
+        for (unsigned i = 0; i < n; i++) if (views & (1u << i)) need += sizeof(view_t);
+        if (available < need) return NULL;
+        p_set_rt *r = &scratch->rt; memset(r, 0, sizeof *r); r->n = (int)n;
+        memcpy(&r->depth, p + 8, sizeof r->depth); p += 8 + sizeof r->depth;
+        if (n) memcpy(r->color, p, n * sizeof r->color[0]); p += n * sizeof r->color[0];
+        for (unsigned i = 0; i < n; i++) if (views & (1u << i)) {
+            r->has_cview[i] = 1; memcpy(&r->cview[i], p, sizeof(view_t)); p += sizeof(view_t);
+        }
+        if (depth) { r->has_dview = 1; memcpy(&r->dview, p, sizeof(view_t)); }
+        return r;
+    }
+    size_t item = h->op == OP_BIND_VATTR ? 4 : h->op == OP_BIND_VSTREAM ? 8 : h->op == OP_BIND_VBUF ? 16 : 0;
+    if (!item) return p;
+    if (available < 8) return NULL;
+    if (h->op == OP_BIND_VBUF) {
+        uint32_t flags; memcpy(&flags, p, 4);
+        if (flags & NVN_RECORD_PACKED) {
+            if (available != 16 || (flags & ~(NVN_RECORD_PACKED | 15u))) return NULL;
+            p_bind_vbuf *r = &scratch->buffer; memset(r, 0, sizeof *r);
+            uint32_t size; memcpy(&size, p + 4, 4);
+            r->first = (int)(flags & 15); r->n = 1; r->r[0].size = size;
+            memcpy(&r->r[0].address, p + 8, 8);
+            return r;
+        }
+    }
+    int32_t first; uint32_t length; memcpy(&first, p, 4); memcpy(&length, p + 4, 4);
+    unsigned n = length & ~NVN_RECORD_PACKED;
+    if (first < 0 || first > 16 || n > 16u - (unsigned)first) return NULL;
+    if (!(length & NVN_RECORD_PACKED)) return available >= 8 + n * item ? p : NULL;
+    if (available < 16) return NULL;
+    uint32_t present, reserved; memcpy(&present, p + 8, 4); memcpy(&reserved, p + 12, 4);
+    if (reserved || (present >> n)) return NULL;
+    size_t need = 16;
+    for (unsigned i = 0; i < n; i++) if (present & (1u << i)) need += item;
+    if (available < need) return NULL;
+    uint8_t *out = h->op == OP_BIND_VATTR ? (uint8_t *)&scratch->attr : h->op == OP_BIND_VSTREAM ? (uint8_t *)&scratch->stream : (uint8_t *)&scratch->buffer;
+    memset(out, 0, 8 + 16 * item); memcpy(out, &first, 4); memcpy(out + 4, &n, 4);
+    p += 16;
+    for (unsigned i = 0; i < n; i++) if (present & (1u << i)) { memcpy(out + 8 + i * item, p, item); p += item; }
+    return out;
+}

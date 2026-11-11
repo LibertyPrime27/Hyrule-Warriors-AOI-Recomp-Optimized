@@ -39,6 +39,7 @@
 #include "nvn_api.h"
 #include "vk.h"
 #include "vk_exec.h"
+#include "nvn_program_source.h"
 #include "platform/platform.h"
 
 #define MAX_PASSES 400
@@ -732,6 +733,7 @@ void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeIn
     for (uint32_t k = 0; ex->prog && k < ex->prog->nstage && k < 6; k++) {   // NVN 2 stages: their DKB_SHADER_DUMP names
         const uint8_t *control = ex->prog->sd[k].control;
         const uint8_t *code = (const uint8_t *)(uintptr_t)ex->prog->sd[k].data;
+        code = nvn_program_source(code);
         // A deferred stage still has its original content identity. Reporting
         // it must not trigger translation of unrelated bound stages.
         uint64_t o = control && gfx_shader_is_nvn2(control) ? gfx_shader_nvn2_hash(control, code) : nvn2_origin(code);

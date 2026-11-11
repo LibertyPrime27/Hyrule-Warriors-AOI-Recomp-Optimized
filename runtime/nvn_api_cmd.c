@@ -23,6 +23,7 @@
 #include "nvn_api.h"
 #include "nvn_hmap.h"
 #include "nvn_mode_trace.h"
+#include "nvn_reclaim.h"
 #include "platform/platform.h"
 
 #define CMD_MAGIC MAGIC('C', 'M', 'D', 'B')
@@ -114,6 +115,8 @@ static void memory_event(Cpu *c, cmd_t *o, int event, uint64_t min) {
 }
 
 // ---------- recording buffer
+static uint64_t record_buffers, record_bytes, record_peak_bytes, record_reinits;
+
 static void put_hdr(uint8_t *p, uint32_t op, uint32_t size) {
     op_hdr h = {op, size};
     memcpy(p, &h, sizeof h);
@@ -123,6 +126,8 @@ static void cmd_reserve(cmd_t *o, size_t need) {
     if (o->seg && o->cur + need + OP_RESERVE <= o->end) return;
     size_t used = o->seg ? (size_t)(o->cur - o->seg) : 0;
     size_t cap = o->seg ? (size_t)(o->end - o->seg) : 0;
+    size_t previous_cap = cap;
+    int first_allocation = o->seg == NULL;
     if (!cap) cap = 64 << 10;
     while (used + need + OP_RESERVE > cap) cap *= 2;
     uint8_t *b = realloc(o->seg, cap);
@@ -132,6 +137,11 @@ static void cmd_reserve(cmd_t *o, size_t need) {
         rt_fatal("nvn: command recording buffer of %zu bytes (command buffer %p, magic %#x, buffer %p of %zu bytes, %zu "
                  "used, %zu asked)", cap, (void *)o, o->magic, (void *)o->seg, o->seg ? (size_t)(o->end - o->seg) : 0,
                  used, need);
+    if (first_allocation) __atomic_fetch_add(&record_buffers, 1, __ATOMIC_RELAXED);
+    uint64_t total = __atomic_add_fetch(&record_bytes, cap - previous_cap, __ATOMIC_RELAXED);
+    uint64_t peak = __atomic_load_n(&record_peak_bytes, __ATOMIC_RELAXED);
+    while (total > peak && !__atomic_compare_exchange_n(&record_peak_bytes, &peak, total, 0,
+                                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
     o->seg = b;
     o->cur = b + used;
     o->end = b + cap;
@@ -188,6 +198,16 @@ static void *rec(cmd_t *o, uint32_t op, size_t payload) {
 // Array-carrying binds take the prefix fields plus n elements; the replay reads only the first n.
 #define RECN(o, OP, T, ARR, N) ((T *)rec((o), (OP), offsetof(T, ARR) + sizeof(((T *)0)->ARR[0]) * (size_t)(N)))
 
+static void rec_array(cmd_t *o, uint32_t op, int first, int n, const void *source, size_t item_size) {
+    recording_mode_check(o, op);
+    uint8_t values[16 * sizeof(NVNbufferRange)];
+    if (n < 0 || n > 16 || item_size > sizeof(NVNbufferRange)) rt_fatal("nvn: invalid host array record");
+    if (n) memcpy(values, source, (size_t)n * item_size);
+    size_t size = nvn_array_pack(NULL, first, n, values, item_size);
+    if (!size) rt_fatal("nvn: invalid host array range");
+    nvn_array_pack(rec(o, op, size), first, n, values, item_size);
+}
+
 static void copy_view(view_t *dst, uint8_t *has, const NVNtextureView *v) {
     *has = v != NULL;
     if (v) *dst = *(const view_t *)v;
@@ -227,8 +247,9 @@ static const tex_t *tex_pin(const NVNtexture *nt) {
 // adding control memory again releases the copies recorded there without walking every live copy. 4 KiB pages cost
 // about 500 lookups per AddControlMemory under the exclusive lock (1.4.3 field: 53 calls a frame, 2 MiB ranges, 3.7
 // copies per page), and the recording threads waited on it.
-typedef struct { uint64_t magic, bytes, made_at, used_at, deferred; } copy_prefix;   // deferred: 0 unknown, 1 none, 2 some
+typedef struct { uint64_t magic, bytes, made_at, used_at; uint32_t deferred, sync_ops; } copy_prefix; // deferred: 0 unknown, 1 none, 2 some
 _Static_assert(sizeof(copy_prefix) % 8 == 0, "records stay 8-byte aligned");
+enum { COPY_SYNC_KNOWN = 1, COPY_SYNC_WAIT = 2, COPY_SYNC_FENCE = 4 };
 typedef struct { uintptr_t lo, hi; uint8_t *copy; } cmd_copy;
 typedef struct { cmd_copy *v; uint32_t n, cap; } copy_bucket;
 static PlatMutex copy_lock = PLAT_MUTEX_INIT;    // guards the two maps, the counters and every prefix
@@ -274,13 +295,15 @@ int nvn_handle_live(uint64_t handle) {
     return live;
 }
 
-uint64_t nvn_handle_bytes(uint64_t handle) {
+static uint64_t copy_info(uint64_t handle, uint32_t *sync_ops) {
     plat_mutex_lock_shared(&copy_lock);
     const copy_prefix *pf = copy_find(handle);
     uint64_t n = pf ? pf->bytes : 0;
+    if (sync_ops) *sync_ops = pf ? pf->sync_ops : 0;
     plat_mutex_unlock_shared(&copy_lock);
     return n;
 }
+uint64_t nvn_handle_bytes(uint64_t handle) { return copy_info(handle, NULL); }
 
 // Marks a live copy used by submission now; its size from OP_BEGIN to OP_END inclusive.
 static uint64_t copy_touch(uint64_t handle, uint64_t now, const char *what) {
@@ -301,19 +324,35 @@ static uint8_t *flatten_recording(const uint8_t *p, size_t n) {
     uint8_t *out = malloc(sizeof(copy_prefix) + n);
     if (!out) rt_fatal("nvn: command copy allocation");
     memcpy(out + sizeof(copy_prefix), p, n);
+    uint32_t deferred = 1, sync_ops = COPY_SYNC_KNOWN;
     for (size_t at = 0;;) {   // the records stay checked: a corrupt one stops here, not in the replay
         op_hdr h;
         memcpy(&h, p + at, sizeof h);
         if (h.size < 8 || (h.size & 7) || h.op >= OP_COUNT_ || h.op == OP_JUMP || h.op == OP_CALL || at + h.size > n ||
             (!at && h.op != OP_BEGIN))
             rt_fatal("nvn: corrupt recording at %p (op %u size %u)", (const void *)(p + at), h.op, h.size);
+        if (h.op == OP_WAIT_SYNC) sync_ops |= COPY_SYNC_WAIT;
+        if (h.op == OP_FENCE_SYNC) sync_ops |= COPY_SYNC_FENCE;
+        if (h.op == OP_BIND_TEX || h.op == OP_BIND_SAMP || h.op == OP_BIND_IMG) {
+            NvnOpScratch normalized;
+            const p_bind_handles *b = nvn_op_normalize((const op_hdr *)(const void *)(p + at), &normalized);
+            if (!b) rt_fatal("nvn: invalid handle bind while flattening a recording");
+            if (b->src && b->n) deferred = 2;
+        } else if (h.op == OP_PUSH_CONST) {
+            if (h.size < 8 + offsetof(p_push_const, w)) rt_fatal("nvn: short push-constant recording");
+            const p_push_const *b = (const p_push_const *)(const void *)(p + at + 8);
+            if (b->src) deferred = 2;
+        }
         at += h.size;
         if (h.op == OP_END) {
             if (at != n) rt_fatal("nvn: recording at %p ends at %zu of %zu bytes", (const void *)p, at, n);
             break;
         }
     }
-    *(copy_prefix *)out = (copy_prefix){.magic = COPY_MAGIC, .bytes = n};
+    // Structure and source pointers are immutable after flattening; only the
+    // data in deferred payloads changes. Reuse these facts instead of walking
+    // an immediate recording three more times at every submission.
+    *(copy_prefix *)out = (copy_prefix){.magic = COPY_MAGIC, .bytes = n, .deferred = deferred, .sync_ops = sync_ops};
     return out + sizeof(copy_prefix);
 }
 
@@ -348,10 +387,25 @@ static void copy_add(uintptr_t lo, uintptr_t hi, uint8_t *copy) {
 }
 
 // Adding control memory again retires every recording copy made in it (the driver's handle lived there).
+static void copy_garbage_free(void *head) {
+    copy_prefix *entry = head;
+    while (entry) {
+        copy_prefix *next;
+        memcpy(&next, (const uint8_t *)(entry + 1), sizeof next);
+        free(entry);
+        entry = next;
+    }
+}
+
 static void release_copies(uintptr_t lo, uintptr_t hi) {
     if (hi <= lo) return;
+    int diag = nvn_memory_diagnostics();
+    uint64_t begin = diag ? plat_now_ns() : 0, released = 0, released_bytes = 0;
     uint64_t replayed = gfx_replayed_submits();
+    copy_prefix *garbage = NULL;
+    uint64_t garbage_count = 0, garbage_bytes = 0;
     plat_mutex_lock(&copy_lock);
+    uint64_t locked = diag ? plat_now_ns() : 0;
     if (nzombies) zombie_sweep(replayed);
     // The index holds a record in its starting page only. A fixed-size control record can straddle the preceding
     // page, so inspect that page too when the new storage overlaps the tail of such a record.
@@ -368,8 +422,17 @@ static void release_copies(uintptr_t lo, uintptr_t hi) {
             ncopies--;
             copy_bytes -= pf->bytes;
             pf->magic = 0;
+            released++;
+            released_bytes += sizeof *pf + pf->bytes;
             if (pf->used_at > replayed) zombie_add(pf);   // a queued submission still reads it
-            else free(pf);
+            else {
+                // Both public and replay lifetimes ended. Its retired payload
+                // can hold a free-list link; pending/zombie payloads stay intact.
+                memcpy((uint8_t *)(pf + 1), &garbage, sizeof garbage);
+                garbage = pf;
+                garbage_count++;
+                garbage_bytes += sizeof *pf + pf->bytes;
+            }
             b->v[i] = b->v[--b->n];
         }
         if (!b->n) {
@@ -379,7 +442,18 @@ static void release_copies(uintptr_t lo, uintptr_t hi) {
             free(b);
         }
     }
+    uint64_t done = diag ? plat_now_ns() : 0;
     plat_mutex_unlock(&copy_lock);
+    int queued = 0;
+    if (garbage) {
+        if (garbage_count >= 1024) queued = nvn_reclaim_submit(garbage, garbage_count, garbage_bytes, copy_garbage_free);
+        if (!queued) copy_garbage_free(garbage);
+    }
+    uint64_t finished = diag ? plat_now_ns() : 0;
+    if (diag && released >= 1024)
+        rt_log("copy-retire: copies=%llu bytes_mib=%.1f wait_ms=%.3f locked_ms=%.3f total_ms=%.3f reclaimer=%s",
+               (unsigned long long)released, released_bytes / 1048576.0,
+               (locked - begin) / 1e6, (done - locked) / 1e6, (finished - begin) / 1e6, queued ? "worker" : "caller");
 }
 
 // ---------- CommandBuffer: object and memory
@@ -390,9 +464,12 @@ NVN_API(nvnCommandBufferInitialize) {
     // Initialize over an object that was never finalized drops its recording buffer (seg lives in host memory). Logged
     // only: the old bytes may be a copy whose buffer another object owns, so freeing it here is not safe.
     static uint32_t reinits;
-    if (o->magic == CMD_MAGIC && o->seg && __atomic_fetch_add(&reinits, 1, __ATOMIC_RELAXED) < 8)
-        rt_log("nvn: Initialize over the command buffer %p, which was not finalized; its %zu-byte recording buffer %p "
-               "is dropped", (void *)o, (size_t)(o->end - o->seg), (void *)o->seg);
+    if (o->magic == CMD_MAGIC && o->seg) {
+        __atomic_fetch_add(&record_reinits, 1, __ATOMIC_RELAXED);
+        if (__atomic_fetch_add(&reinits, 1, __ATOMIC_RELAXED) < 8)
+            rt_log("nvn: Initialize over the command buffer %p, which was not finalized; its %zu-byte recording buffer %p "
+                   "is dropped", (void *)o, (size_t)(o->end - o->seg), (void *)o->seg);
+    }
     memset(o, 0, sizeof *o);
     o->magic = CMD_MAGIC;
     o->dev = arg_p(c, 1);
@@ -405,6 +482,10 @@ NVN_API(nvnCommandBufferInitialize) {
 // void nvnCommandBufferFinalize(NVNcommandBuffer *cmd): handles outlive their recorder
 NVN_API(nvnCommandBufferFinalize) {
     cmd_t *o = cmd_of(c);
+    if (o->seg) {
+        __atomic_fetch_sub(&record_bytes, (size_t)(o->end - o->seg), __ATOMIC_RELAXED);
+        __atomic_fetch_sub(&record_buffers, 1, __ATOMIC_RELAXED);
+    }
     free(o->seg);
     o->seg = o->cur = o->end = NULL;
     o->magic = 0;
@@ -587,7 +668,9 @@ NVN_API(nvnCommandBufferSetRenderTargets) {
         rt_log("nvn: SetRenderTargets with %d colour targets", n);
         n = n < 0 ? 0 : 8;
     }
-    p_set_rt *r = REC(cmd_of(c), OP_SET_RT, p_set_rt);
+    cmd_t *o = cmd_of(c);
+    recording_mode_check(o, OP_SET_RT);
+    p_set_rt value = {0}, *r = &value;
     r->n = n;
     for (int i = 0; i < n; i++) {
         r->color[i] = ct ? tex_pin(ct[i]) : NULL;
@@ -595,6 +678,8 @@ NVN_API(nvnCommandBufferSetRenderTargets) {
     }
     r->depth = tex_pin(dt);
     copy_view(&r->dview, &r->has_dview, dv);
+    nvn_rt_pack(rec(o, OP_SET_RT, nvn_rt_pack(NULL, r)), r);
+    hw_fix(o, (8 + sizeof *r + 7) & ~(size_t)7); // preserve guest-visible command-memory usage
     if (cmd_rt_trace(c, "SetRenderTargets")) {
         for (int i = 0; i < n; i++)
             rt_log("rt-record: cmd=%p color[%d] object=%p storage=%p serial=%llu",
@@ -732,10 +817,7 @@ NVN_API(nvnCommandBufferBindVertexAttribState) {
     cmd_t *o = cmd_of(c);
     int n = (int)arg_x(c, 1);
     if (n < 0 || n > 16) { rt_log("nvn: BindVertexAttribState n %d", n); return; }
-    p_bind_vattr *r = RECN(o, OP_BIND_VATTR, p_bind_vattr, st, n);
-    r->first = 0;
-    r->n = n;
-    memcpy(r->st, arg_p(c, 2), 4 * (size_t)n);
+    rec_array(o, OP_BIND_VATTR, 0, n, arg_p(c, 2), 4);
     hw_fix(o, 68);   // the driver always writes all 16 attribute formats: 17 words
 }
 // void nvnCommandBufferBindVertexStreamState(NVNcommandBuffer *cmd, int n, const NVNvertexStreamState *states)
@@ -743,18 +825,12 @@ NVN_API(nvnCommandBufferBindVertexStreamState) {
     cmd_t *o = cmd_of(c);
     int n = (int)arg_x(c, 1);
     if (n < 0 || n > 16) { rt_log("nvn: BindVertexStreamState n %d", n); return; }
-    p_bind_vstream *r = RECN(o, OP_BIND_VSTREAM, p_bind_vstream, st, n);
-    r->first = 0;
-    r->n = n;
-    memcpy(r->st, arg_p(c, 2), 8 * (size_t)n);
+    rec_array(o, OP_BIND_VSTREAM, 0, n, arg_p(c, 2), 8);
     hw_fix(o, 4 * (16 + (size_t)n));
 }
 static void bind_vertex_buffers(cmd_t *o, int first, int n, const NVNbufferRange *rg) {
     if (first < 0 || n < 0 || first + n > 16) { rt_log("nvn: BindVertexBuffers first %d n %d", first, n); return; }
-    p_bind_vbuf *r = RECN(o, OP_BIND_VBUF, p_bind_vbuf, r, n);
-    r->first = first;
-    r->n = n;
-    memcpy(r->r, rg, sizeof *rg * (size_t)n);
+    rec_array(o, OP_BIND_VBUF, first, n, rg, sizeof *rg);
     hw_fix(o, 24 * (size_t)n);
 }
 // void nvnCommandBufferBindVertexBuffers(NVNcommandBuffer *cmd, int first, int n, const NVNbufferRange *ranges)
@@ -765,19 +841,22 @@ NVN_API(nvnCommandBufferBindVertexBuffer) {
     bind_vertex_buffers(cmd_of(c), (int)arg_x(c, 1), 1, &r);
 }
 // Uniform and storage buffers: one record per binding (CB_SIZE/ADDRESS 4 words + CB_BIND 1 on hardware).
+static void rec_buffer(cmd_t *o, uint32_t op, p_bind_buf value) {
+    size_t size = nvn_buffer_pack(NULL, &value);
+    nvn_buffer_pack(rec(o, op, size), &value);
+    hw_fix(o, 20);
+}
 static void bind_buffers(const Cpu *c, uint32_t op) {   // (cmd, stage, first, n, const NVNbufferRange *ranges)
     cmd_t *o = cmd_of(c);
     int st = (int)arg_x(c, 1), first = (int)arg_x(c, 2), n = (int)arg_x(c, 3);
     const NVNbufferRange *rg = arg_p(c, 4);
     for (int i = 0; i < n; i++) {
-        *REC(o, op, p_bind_buf) = (p_bind_buf){st, first + i, rg[i].address, rg[i].size};
-        hw_fix(o, 20);
+        rec_buffer(o, op, (p_bind_buf){st, first + i, rg[i].address, rg[i].size});
     }
 }
 static void bind_buffer(const Cpu *c, uint32_t op) {    // (cmd, stage, index, NVNbufferAddress address, size_t size)
     cmd_t *o = cmd_of(c);
-    *REC(o, op, p_bind_buf) = (p_bind_buf){(int)arg_x(c, 1), (int)arg_x(c, 2), arg_x(c, 3), arg_x(c, 4)};
-    hw_fix(o, 20);
+    rec_buffer(o, op, (p_bind_buf){(int)arg_x(c, 1), (int)arg_x(c, 2), arg_x(c, 3), arg_x(c, 4)});
 }
 NVN_API(nvnCommandBufferBindUniformBuffer) { bind_buffer(c, OP_BIND_UBO); }
 NVN_API(nvnCommandBufferBindUniformBuffers) { bind_buffers(c, OP_BIND_UBO); }
@@ -820,12 +899,18 @@ NVN_API(nvnCommandBufferPushComputeConstantsDeferred) { push_constants(c, 1, 1);
 // recording and before the submit (nvn_submit_prepare). hw_bytes: the hardware size of the plain variant.
 static void bind_handles(cmd_t *o, uint32_t op, int st, int first, int n, const uint64_t *h, int deferred, size_t hw_bytes) {
     if (n < 0 || n > 32) { rt_log("nvn: bind of %d handles", n); return; }
-    p_bind_handles *r = RECN(o, op, p_bind_handles, h, n);
-    r->stage = st;
-    r->first = first;
-    r->n = n;
-    r->src = deferred ? (uint64_t)(uintptr_t)h : 0;
-    memcpy(r->h, h, 8 * (size_t)n);
+    size_t compact = n == 1 && !deferred ? nvn_handle_pack_one(NULL, st, first, 0) : 0;
+    if (compact) {
+        uint64_t value; memcpy(&value, h, sizeof value);
+        nvn_handle_pack_one(rec(o, op, compact), st, first, value);
+    } else {
+        p_bind_handles *r = RECN(o, op, p_bind_handles, h, n);
+        r->stage = st;
+        r->first = first;
+        r->n = n;
+        r->src = deferred ? (uint64_t)(uintptr_t)h : 0;
+        memcpy(r->h, h, 8 * (size_t)n);
+    }
     hw_fix(o, hw_bytes ? hw_bytes : 16 + 4 * (size_t)n);   // macro 7 + method 0x1a2c + CB_POS + one word per binding
 }
 static void bind_handle_array(const Cpu *c, uint32_t op, int deferred, int wide) {   // (cmd, stage, first, n, handles)
@@ -898,18 +983,21 @@ NVN_API(nvnCommandBufferDrawArraysInstanced) {
 }
 // void nvnCommandBufferDrawElements(NVNcommandBuffer *cmd, NVNdrawPrimitive prim, NVNindexType type, int count,
 // NVNbufferAddress indices)
+static void rec_indexed(cmd_t *o, p_draw_idx value) {
+    size_t size = nvn_indexed_pack(NULL, &value);
+    nvn_indexed_pack(rec(o, OP_DRAW_IDX, size), &value);
+}
 NVN_API(nvnCommandBufferDrawElements) {
     cmd_rt_trace(c, "DrawElements");
     cmd_t *o = cmd_of(c);
-    *REC(o, OP_DRAW_IDX, p_draw_idx) = (p_draw_idx){(int)arg_x(c, 1), (int)arg_x(c, 2), (int)arg_x(c, 3), 0, 0, 1, arg_x(c, 4)};
+    rec_indexed(o, (p_draw_idx){(int)arg_x(c, 1), (int)arg_x(c, 2), (int)arg_x(c, 3), 0, 0, 1, arg_x(c, 4)});
     hw_fix(o, 48);
 }
 // void nvnCommandBufferDrawElementsBaseVertex(..., NVNbufferAddress indices, int base_vertex)
 NVN_API(nvnCommandBufferDrawElementsBaseVertex) {
     cmd_rt_trace(c, "DrawElementsBaseVertex");
     cmd_t *o = cmd_of(c);
-    *REC(o, OP_DRAW_IDX, p_draw_idx) =
-        (p_draw_idx){(int)arg_x(c, 1), (int)arg_x(c, 2), (int)arg_x(c, 3), (int)arg_x(c, 5), 0, 1, arg_x(c, 4)};
+    rec_indexed(o, (p_draw_idx){(int)arg_x(c, 1), (int)arg_x(c, 2), (int)arg_x(c, 3), (int)arg_x(c, 5), 0, 1, arg_x(c, 4)});
     hw_fix(o, 44);
 }
 // void nvnCommandBufferDrawElementsInstanced(..., NVNbufferAddress indices, int base_vertex, int base_instance,
@@ -917,8 +1005,8 @@ NVN_API(nvnCommandBufferDrawElementsBaseVertex) {
 NVN_API(nvnCommandBufferDrawElementsInstanced) {
     cmd_rt_trace(c, "DrawElementsInstanced");
     cmd_t *o = cmd_of(c);
-    *REC(o, OP_DRAW_IDX, p_draw_idx) = (p_draw_idx){(int)arg_x(c, 1), (int)arg_x(c, 2), (int)arg_x(c, 3),
-                                                    (int)arg_x(c, 5), (int)arg_x(c, 6), (int)arg_x(c, 7), arg_x(c, 4)};
+    rec_indexed(o, (p_draw_idx){(int)arg_x(c, 1), (int)arg_x(c, 2), (int)arg_x(c, 3),
+                              (int)arg_x(c, 5), (int)arg_x(c, 6), (int)arg_x(c, 7), arg_x(c, 4)});
     hw_fix(o, 44);
 }
 // void nvnCommandBufferDrawArraysIndirect(NVNcommandBuffer *cmd, NVNdrawPrimitive prim, NVNbufferAddress indirect)
@@ -1104,8 +1192,10 @@ static int fence_list_has(const NvnFenceBatch *batch, const sync_t *sync) {
 NvnFenceBatch *nvn_submit_capture_fences(const uint64_t *handles, int n) {
     NvnFenceBatch *batch = NULL;
     for (int i = 0; i < n; i++) {
-        uint64_t bytes = nvn_handle_bytes(handles[i]);
+        uint32_t sync_ops;
+        uint64_t bytes = copy_info(handles[i], &sync_ops);
         if (!bytes) rt_fatal("nvn: recorded-fence capture needs a live command handle");
+        if ((sync_ops & COPY_SYNC_KNOWN) && !(sync_ops & COPY_SYNC_FENCE)) continue;
         const uint8_t *start = (const uint8_t *)(uintptr_t)handles[i];
         for (uint64_t offset = 0; offset < bytes;) {
             if (bytes - offset < sizeof(op_hdr)) rt_fatal("nvn: truncated recorded-fence header");
@@ -1208,6 +1298,8 @@ static void wait_submission(const uint64_t *handles, int n) {
     uint64_t target = 0;
     NvnFenceBatch produced = {0};
     for (int i = 0; i < n; i++) {
+        const copy_prefix *pf = (const copy_prefix *)(uintptr_t)handles[i] - 1;
+        if ((pf->sync_ops & COPY_SYNC_KNOWN) && !(pf->sync_ops & (COPY_SYNC_WAIT | COPY_SYNC_FENCE))) continue;
         uint64_t value = wait_target((const uint8_t *)(uintptr_t)handles[i], 0, &produced);
         if (value > target) target = value;
     }
@@ -1250,7 +1342,10 @@ static int resolve_deferred(const uint8_t *p, int depth) {   // returns the numb
                 memcpy(b->w, (const void *)(uintptr_t)b->src, (size_t)b->bytes);
             }
         } else if (h.op == OP_BIND_TEX || h.op == OP_BIND_IMG || h.op == OP_BIND_SAMP) {
-            p_bind_handles *b = (p_bind_handles *)(uintptr_t)(p + 8);
+            NvnOpScratch normalized;
+            const void *payload = nvn_op_normalize((const op_hdr *)p, &normalized);
+            if (!payload) rt_fatal("nvn: invalid handle-bind record at %p", (const void *)p);
+            p_bind_handles *b = (p_bind_handles *)(uintptr_t)payload;
             if (b->src && b->n > 0 && b->n <= 32) {
                 nd++;
                 uint64_t cur[32];
@@ -1277,7 +1372,10 @@ void nvn_submit_prepare(const uint64_t *handles, int n) {
         nvn_mode_trace(NVN_MODE_HANDLE, 0, handle, (uint32_t)i, now);
     }
     wait_submission(handles, n);
-    for (int i = 0; i < n; i++) resolve_deferred((const uint8_t *)(uintptr_t)handles[i], 0);
+    for (int i = 0; i < n; i++) {
+        const copy_prefix *pf = (const copy_prefix *)(uintptr_t)handles[i] - 1;
+        if (pf->deferred != 1) resolve_deferred((const uint8_t *)(uintptr_t)handles[i], 0);
+    }
 }
 
 // Asynchronous replay. A copy a queued submission still reads keeps that submission's deferred binds: when it holds
@@ -1315,6 +1413,7 @@ void nvn_submit_prepare_async(const uint64_t *handles, uint64_t *out, int n) {
     plat_mutex_unlock(&copy_lock);
     wait_submission(out, n);
     for (int i = 0; i < n; i++) {
+        if (((const copy_prefix *)(uintptr_t)out[i] - 1)->deferred == 1) continue;
         int nd = resolve_deferred((const uint8_t *)(uintptr_t)out[i], 0);
         if (out[i] == handles[i]) ((copy_prefix *)(uintptr_t)out[i] - 1)->deferred = nd ? 2 : 1;
     }
@@ -1346,6 +1445,10 @@ int nvn_memory_diagnostics(void) {
 void nvn_runtime_memory_stats(NvnMemoryStats *out) {
     if (!out) return;
     memset(out, 0, sizeof *out);
+    out->record_buffers = __atomic_load_n(&record_buffers, __ATOMIC_RELAXED);
+    out->record_bytes = __atomic_load_n(&record_bytes, __ATOMIC_RELAXED);
+    out->record_peak_bytes = __atomic_load_n(&record_peak_bytes, __ATOMIC_RELAXED);
+    out->record_reinits = __atomic_load_n(&record_reinits, __ATOMIC_RELAXED);
     plat_mutex_lock_shared(&copy_lock);
     out->copies = ncopies;
     out->copy_bytes = copy_bytes + ncopies * sizeof(copy_prefix);
@@ -1362,6 +1465,11 @@ void nvn_runtime_memory_stats(NvnMemoryStats *out) {
     out->texture_pin_index_bytes = (uint64_t)pins.cap * (pins.klen + sizeof(void *));
     plat_mutex_unlock_shared(&pin_lock);
     nvn_program_memory_stats(out);
+    NvnReclaimStats reclaim;
+    nvn_reclaim_stats(&reclaim);
+    out->reclaim_copies = reclaim.copies;
+    out->reclaim_bytes = reclaim.bytes;
+    out->reclaim_peak_bytes = reclaim.peak_bytes;
 }
 
 const char *nvn_op_name(uint32_t op) {
