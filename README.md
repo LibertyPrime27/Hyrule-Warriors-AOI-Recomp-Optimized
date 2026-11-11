@@ -9,6 +9,7 @@
 - seamless loading
 - correct lighting in caves and other torch- or crystal-lit areas
 - lower memory use
+- two-player co-op, with each player on their own controller or keyboard
 - DLC and update support
 - a game icon taken from your own copy
 
@@ -62,6 +63,27 @@ This fork includes the upstream HWAoI Recomp memory update (November 11, 2026):
 - **Measured upstream:** in the 1080p / 60 FPS opening scene, the retained command-copy peak dropped from **1128 to 1013 MiB** and the process private-memory peak fell by **137 MiB**, with no FPS change.
 - **Optional vertex cache.** An opt-in read-only vertex snapshot cache (`TOTK_VERTEX_CACHE`) is included but **off by default**, because its low-memory path is still too slow for normal play.
 
+### Two-player co-op and controls
+
+The game's two-player mode works. Each player is a separate Switch controller fed by their own device, so one player's input never reaches the other. Set it up in **Esc → Controls → Players and console**:
+
+- **Player 1 / Player 2 input.**
+  - **Options:** Auto, Keyboard and mouse, or any connected gamepad by name. Any brand works (Xbox, PlayStation, Switch Pro, generic), and the two players can use different brands.
+  - **Ownership:** each device drives one player only. Auto gives Player 1 the first gamepad plus the keyboard and mouse, and Player 2 the next gamepad.
+  - **Hot-plugging:** gamepads plugged in or out while playing are picked up.
+- **Player 1 / Player 2 controller.**
+  - **Options:** Pro Controller or Joy-Con pair, as the game sees it.
+  - **Rumble and motion:** each follows that player's own gamepad.
+- **Console mode.** Docked or Handheld, switchable live. The game is told the console was docked or undocked, as on real hardware.
+
+When the game starts two-player mode, it asks for two controllers and receives both players set up here. The remapping rows have a **Bindings for: Player 1 / Player 2** row, so each player has their own keyboard and gamepad bindings.
+
+Screen settings were cleaned up too:
+
+- **Fullscreen** is a Windowed / Fullscreen setting that applies live, as well as through F11.
+- **Window size** can be changed from the menu again.
+- **Windowed mode** starts at 1280×720.
+
 ### DLC and update support
 
 - **Merged NUPs work.** A NUP with the game, the 1.0.3 update and DLC merged together compiles directly. DLC packages are installed under `work/game/aoc/<index>`.
@@ -89,7 +111,7 @@ The 30 / 60 / 90 / 120 FPS settings are available, both in the compiler (**Allow
 
 ## Current status
 
-**Current version: 1.0.2 (November 10, 2026).** Version 1.0.2 fixes the dark caves and local lighting, and adds upstream's memory improvements. The game boots, plays the opening movies and reaches outdoor exploration and combat. A complete playthrough has not been verified.
+**Current version: 1.0.3 (November 10, 2026).** Version 1.0.3 adds two-player co-op with per-player input devices, controllers and bindings, plus a live docked/handheld switch. The game boots, plays the opening movies and reaches outdoor exploration and combat. A complete playthrough has not been verified.
 
 | | Part | Progress |
 | --- | --- | --- |
@@ -97,6 +119,7 @@ The 30 / 60 / 90 / 120 FPS settings are available, both in the compiler (**Allow
 | ✅ | Boot and resources | Title/module checks pass, and resources load from a verified cache. Verification is persisted between launches. |
 | ✅ | Opening movies and audio | Both opening movies play through; audio and voices work. |
 | ✅ | Movement and camera | Keyboard/mouse and SDL controller input work. |
+| ✅ | Two-player co-op | Two controllers from separate devices (any gamepad brand, or keyboard and mouse), with per-player bindings. Split-screen play in every mission is not yet verified. |
 | ✅ | Update 1.0.3 and DLC | Merged or separate update/DLC NUPs compile; add-on content mounts in game. |
 | ✅ | Memory use | Upstream's smaller command records and bounded upload/timestamp caches are included (opening scene: 137 MiB lower private-memory peak). The vertex-cache experiment stays off by default. |
 | ✅ | Combat performance | About 57 FPS average in crowded fights on the test PC (previously 13–18). |
