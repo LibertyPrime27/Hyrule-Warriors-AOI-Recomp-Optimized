@@ -7,6 +7,8 @@
 
 - large combat performance gains
 - seamless loading
+- correct lighting in caves and other torch- or crystal-lit areas
+- lower memory use
 - DLC and update support
 - a game icon taken from your own copy
 
@@ -36,6 +38,15 @@ Before this fork, crowded combat dropped to **13–18 FPS** on an RTX 3080 / i9-
 - **Guest barriers are recorded only when needed.** A guest `nvnCommandBufferBarrier` used to become a full Vulkan pipeline drain. Now only masks that actually order earlier work (the ORDER bits) record a barrier. Invalidate-only barriers are dropped, which removes 80–88 % of combat drains. `TOTK_BARRIER_ELIDE=0` restores the old behaviour.
 
 Combat is now CPU-bound rather than stalled on the GPU.
+
+### Lighting fix: dark caves and local lights
+
+Caves and other areas lit only by torches, crystals and other local lights rendered almost black. The game keeps its light list, light parameters and per-tile light indices in **buffer textures**. Neither the runtime nor the shader translator handled them, so every light lookup read zero:
+
+- **The runtime** couldn't create an image for a buffer texture, so it answered the slot as 2D and bound a blank placeholder. Buffer textures are now bound as Vulkan texel buffers over the game's own memory, so light lists written by the GPU are read too.
+- **The light shaders** read these buffers with a 2D zero-Y texel fetch, which the hardware treats as element X of the buffer. Translator patch `0004` now recognises that form, and graphics shaders now get texture-type answers from the host at all (combined texture handles map to slots like the runtime does).
+
+In the cave scene that was tested, the blank texture bindings went from **292 to 0**, and local lights now match the original game.
 
 ### Loading and stutter
 
@@ -78,7 +89,7 @@ The 30 / 60 / 90 / 120 FPS settings are available, both in the compiler (**Allow
 
 ## Current status
 
-**Current version: 1.0.1 (November 9, 2026).** Version 1.0.1 fixes compiling, which failed at the final link step in 1.0.0. The game boots, plays the opening movies and reaches outdoor exploration and combat. A complete playthrough has not been verified.
+**Current version: 1.0.2 (November 10, 2026).** Version 1.0.2 fixes the dark caves and local lighting, and adds upstream's memory improvements. The game boots, plays the opening movies and reaches outdoor exploration and combat. A complete playthrough has not been verified.
 
 | | Part | Progress |
 | --- | --- | --- |
@@ -87,9 +98,10 @@ The 30 / 60 / 90 / 120 FPS settings are available, both in the compiler (**Allow
 | ✅ | Opening movies and audio | Both opening movies play through; audio and voices work. |
 | ✅ | Movement and camera | Keyboard/mouse and SDL controller input work. |
 | ✅ | Update 1.0.3 and DLC | Merged or separate update/DLC NUPs compile; add-on content mounts in game. |
-| 🔧 | Memory use | Upstream's smaller command records and bounded upload/timestamp caches are included. The vertex-cache experiment stays off by default. |
+| ✅ | Memory use | Upstream's smaller command records and bounded upload/timestamp caches are included (opening scene: 137 MiB lower private-memory peak). The vertex-cache experiment stays off by default. |
 | ✅ | Combat performance | About 57 FPS average in crowded fights on the test PC (previously 13–18). |
-| 🔧 | Rendering | Outdoor scenes and combat render. Some reported crash scenes await retesting. |
+| ✅ | Lighting | Local lights (torches, crystals, caves) work: buffer textures are bound and fetched correctly. |
+| 🔧 | Rendering | Outdoor scenes, caves and combat render. Some reported crash scenes await retesting. |
 | 🧪 | 90 / 120 FPS | Selectable, but they speed up gameplay. Use 60 FPS plus frame generation. |
 | 🧪 | Native resolution presets | 720p, 1080p, 1440p and 4K render sizes are confirmed. Higher resolutions are unstable. |
 | 🔧 | Playthrough coverage | Opening exploration and early combat only; later missions remain unverified. |

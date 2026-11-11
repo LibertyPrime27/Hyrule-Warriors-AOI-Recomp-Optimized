@@ -1,8 +1,9 @@
 name: Release compiler
 
 # Builds the portable compiler ZIP on GitHub and publishes it as a release, so nothing large is uploaded from a
-# developer's connection. The game-independent toolchain (Python, LLVM, runtime dependencies, Ninja, zlib, shader
-# translator, licenses) is reused from an earlier release asset and its manifest hashes are checked; the source comes
+# developer's connection. The game-independent toolchain (Python, LLVM, runtime dependencies, Ninja, zlib,
+# licenses) is reused from an earlier release asset with its manifest hashes checked; the shader translator is built
+# from the tag (tools/build_xlate_hwaoi.py) and the source comes
 # from the tagged commit (tools/rebase_compiler_release.py). No game content is involved at any step.
 
 on:
@@ -15,7 +16,7 @@ on:
         required: true
       base:
         description: "Earlier release whose toolchain is reused"
-        default: "v1.0.0"
+        default: "v1.0.1"
 
 permissions:
   contents: write
@@ -26,7 +27,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ inputs.tag || github.ref_name }}
-      BASE: ${{ inputs.base || 'v1.0.0' }}
+      BASE: ${{ inputs.base || 'v1.0.1' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,6 +52,28 @@ jobs:
           $root = Get-ChildItem $dir -Directory | Select-Object -First 1
           "BASE_DIR=$($root.FullName)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
+      - name: Build the shader translator from this tag
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          # .NET 10 SDK in the runner's temp tools folder (HWAOI_TOOLS layout: DotNet, NuGet beside it).
+          $tools = Join-Path $env:RUNNER_TEMP "tools"
+          $script = Join-Path $env:RUNNER_TEMP "dotnet-install.ps1"
+          Invoke-WebRequest -UseBasicParsing https://dot.net/v1/dotnet-install.ps1 -OutFile $script
+          & $script -Channel 10.0 -InstallDir (Join-Path $tools "DotNet") -NoPath
+          New-Item -ItemType Directory -Force (Join-Path $tools "DotNet\nuget") | Out-Null
+          # The pinned DKB source the vendored translator is verified against (config/upstream.json).
+          $upstream = Get-Content config/upstream.json -Raw | ConvertFrom-Json
+          $ref = "work/references/dkb-pc-recomp"
+          git init -q $ref
+          git -C $ref fetch -q --depth 1 $upstream.repository $upstream.commit
+          git -C $ref checkout -q FETCH_HEAD
+          & "$env:BASE_DIR\python\python.exe" -E -s tools/build_xlate_hwaoi.py --online `
+            --dotnet (Join-Path $tools "DotNet\dotnet.exe") --out work/build/hwaoi196608/xlate-release
+          if ($LASTEXITCODE -ne 0) { throw "translator build failed" }
+          Get-Content work/build/hwaoi196608/xlate-release/totk_xlate.id
+
       - name: Test the icon and link rule with the bundled Clang and Ninja
         shell: pwsh
         working-directory: tests/hwaoi
@@ -70,7 +93,8 @@ jobs:
           $name = "Hyrule-Warriors-AOI-Recomp-Optimized-$env:TAG"
           $out = Join-Path $env:RUNNER_TEMP "out\$name"
           $zip = Join-Path $env:RUNNER_TEMP "dist\$name-win64.zip"
-          & "$env:BASE_DIR\python\python.exe" -E -s tools/rebase_compiler_release.py $env:BASE_DIR $out $zip $env:VERSION
+          & "$env:BASE_DIR\python\python.exe" -E -s tools/rebase_compiler_release.py $env:BASE_DIR $out $zip $env:VERSION `
+            --translator work/build/hwaoi196608/xlate-release
           if ($LASTEXITCODE -ne 0) { throw "packaging failed" }
           "OUT_DIR=$out" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "ZIP=$zip" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV

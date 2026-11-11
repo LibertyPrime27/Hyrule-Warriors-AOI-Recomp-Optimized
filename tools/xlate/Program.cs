@@ -178,7 +178,13 @@ static class SwshXlate
                 if (bytes >= img && bytes < img + 8 * (int)c[0] && (bytes - img) % 8 == 0) return (bytes - img) / 8;
                 return -1;
             }
-            return (cbufSlot < 0 || (cbufSlot & 0xffff) == 2) && bytes >= TexBase && bytes < SampBase && (bytes - TexBase) % 8 == 0 ? (bytes - TexBase) / 8 : -1;
+            if (cbufSlot >= 0 && (cbufSlot & 0xffff) != 2) return -1;
+            if (bytes >= TexBase && bytes < SampBase && (bytes - TexBase) % 8 == 0) return (bytes - TexBase) / 8;
+            // Combined texture handles at c[2]+0x20..0x120, slot (bytes - 0x20) / 8, as the host's gfx_shader.c
+            // handle_slot maps them. Without this range graphics shaders never received a type answer (every query
+            // fell back to 2D), so HWAoI's buffer-texture light fetches could not be recognized.
+            if (bytes >= 0x20 && bytes < 0x120 && (bytes - 0x20) % 8 == 0) return (bytes - 0x20) / 8;
+            return -1;
         }
         public SamplerType QuerySamplerType(int handle, int cbufSlot = -1)
         {

@@ -1,0 +1,40 @@
+diff --git a/ryujinx/src/Ryujinx.Graphics.Shader/Instructions/InstEmitTexture.cs b/ryujinx/src/Ryujinx.Graphics.Shader/Instructions/InstEmitTexture.cs
+index fa0b873..ab1538b 100644
+--- a/ryujinx/src/Ryujinx.Graphics.Shader/Instructions/InstEmitTexture.cs
++++ b/ryujinx/src/Ryujinx.Graphics.Shader/Instructions/InstEmitTexture.cs
+@@ -487,6 +487,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                     flags &= ~TextureFlags.LodLevel;
+                 }
+ 
++                // HWAoI (2026-11-10): the game's deferred-light shaders read their buffer textures (light lists, light
++                // parameters, cluster indices) with a 2D LZ texel fetch whose Y register is RZ; the hardware fetches
++                // element X of a buffer descriptor. Ask the host when Y is RZ, and fetch the buffer by X alone.
++                bool buffer2D = tldsOp.Target == TldsTarget.Texture2DLodZero &&
++                    tldsOp.SrcB == RegisterConsts.RegisterZeroIndex &&
++                    context.TranslatorContext.GpuAccessor.QuerySamplerType(tldsOp.TidB) == SamplerType.TextureBuffer;
++
++                if (buffer2D)
++                {
++                    type = SamplerType.TextureBuffer;
++                    flags &= ~TextureFlags.LodLevel;
++                }
++
+                 switch (tldsOp.Target)
+                 {
+                     case TldsTarget.Texture1DLodZero:
+@@ -523,8 +536,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
+ 
+                     case TldsTarget.Texture2DLodZero:
+                         sourcesList.Add(Ra());
+-                        sourcesList.Add(Rb());
+-                        sourcesList.Add(Const(0));
++
++                        if (!buffer2D)
++                        {
++                            sourcesList.Add(Rb());
++                            sourcesList.Add(Const(0));
++                        }
++
+                         break;
+ 
+                     case TldsTarget.Texture2DLodZeroOffset:

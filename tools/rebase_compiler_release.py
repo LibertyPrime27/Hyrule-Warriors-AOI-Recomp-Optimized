@@ -6,7 +6,10 @@ release ZIP, adds the committed source exactly as tools/package_hwaoi_compiler.p
 with the bundled Clang, writes START-HERE.txt and a fresh bundle.json, scans the content and zips it. It runs in the
 release workflow (.github/workflows/release-compiler.yml), so publishing needs no local upload.
 
-usage: rebase_compiler_release.py BASE_RELEASE_DIR OUT_DIR ZIP VERSION
+usage: rebase_compiler_release.py BASE_RELEASE_DIR OUT_DIR ZIP VERSION [--translator BUILT_XLATE_DIR]
+
+--translator: a shader translator built from this checkout (tools/build_xlate_hwaoi.py) replaces the base's, for
+releases that change the translator or its patches.
 """
 from __future__ import annotations
 import argparse
@@ -36,7 +39,7 @@ def start_here_text():
     raise ValueError("START-HERE text not found in package_hwaoi_compiler.py")
 
 
-def build(base: Path, out: Path, zip_path: Path, version: str):
+def build(base: Path, out: Path, zip_path: Path, version: str, translator: Path | None = None):
     base, out = base.resolve(strict=True), out.resolve()
     if out.exists() or zip_path.exists():
         raise ValueError("Output folder or ZIP already exists")
@@ -51,7 +54,11 @@ def build(base: Path, out: Path, zip_path: Path, version: str):
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     out.mkdir(parents=True)
     for name in CARRIED:
-        shutil.copytree(base / name, out / name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pdb"))
+        source = translator.resolve(strict=True) if name == "translator" and translator else base / name
+        shutil.copytree(source, out / name,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pdb", "build-report.json"))
+    if translator and not ((out / "translator/totk_xlate.exe").is_file() and (out / "translator/totk_xlate.id").is_file()):
+        raise ValueError("The built translator lacks totk_xlate.exe or totk_xlate.id")
     for relative in pkg.source_files():
         target = out / "source" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -80,9 +87,10 @@ def main(argv=None):
     ap.add_argument("out", type=Path)
     ap.add_argument("zip", type=Path)
     ap.add_argument("version")
+    ap.add_argument("--translator", type=Path, help="built shader translator folder replacing the base's")
     args = ap.parse_args(argv)
     try:
-        build(args.base, args.out, args.zip, args.version)
+        build(args.base, args.out, args.zip, args.version, args.translator)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"rebase_compiler_release: {error}", file=sys.stderr)
         return 1
