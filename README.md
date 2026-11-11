@@ -64,16 +64,25 @@ In the cave scene that was tested, the blank texture bindings went from **292 to
   - Compute shaders, some of which take 1–2 seconds each to translate, start translating as soon as the game registers them at boot, so they are ready before the scene needs them.
   - Shaders a frame is waiting for get their own translator and skip ahead of background work.
   - The number of translator processes follows your CPU (2 to 6) and runs at below-normal priority, so it does not take CPU time from the game.
+- **No freeze the first time a move plays.** A new move's effects use compute shaders the game has not run before, and their pipelines used to be built at that moment, freezing the game for **9 to 13 seconds** (measured). Their pipelines are now built in the background as soon as the shaders translate during loading. In a session with empty caches, 128 were built ahead, no move had to wait, and the worst hitch was 0.8 s.
 - **Game files are verified once, not on every launch.** RomFS hash verification is saved in `romfs-verified.bin`, so later launches skip re-hashing unchanged game data. Scene loads are much shorter.
 
-### Memory use (from upstream)
+### Memory use: built for 16 GB PCs
 
-This fork includes the upstream HWAoI Recomp memory update (November 11, 2026):
+The game commits about 16 GB at boot: its own 9.2 GB heap, plus the GPU memory Windows charges to the process. This release lowers what the runtime itself holds and keeps that commit from failing on PCs with little page file.
 
-- **Smaller command records.** Viewport and fixed-state command records are packed to the size they use.
-- **Bounded caches.** At most eight completed upload batches are kept, timestamp slots are reused, and the query pool is released at shutdown.
-- **Measured upstream:** in the 1080p / 60 FPS opening scene, the retained command-copy peak dropped from **1128 to 1013 MiB** and the process private-memory peak fell by **137 MiB**, with no FPS change.
-- **Optional vertex cache.** An opt-in read-only vertex snapshot cache (`TOTK_VERTEX_CACHE`) is included but **off by default**, because its low-memory path is still too slow for normal play.
+From the upstream HWAoI Recomp memory update by Ksora25 (November 11, 2026):
+
+- **Compact command records.** The same command lists take about 31 % less memory (186 → 128 MiB in the opening field).
+- **Compressed shader-program source.** Program source the game has not used yet is kept compressed: about 166 MiB saved.
+- **Smaller allocation pools and background freeing.** Released command copies are freed on a background thread, so the game thread does not stall on it.
+
+Added in this fork:
+
+- **Idle command copies are compressed.** The runtime keeps a copy of every command list the game records until the game reuses its memory, which takes minutes. Copies no one has read for 2 seconds are compressed and decompressed on the rare reuse. Measured after four minutes of play: **793 MiB of copies held in 104 MiB**.
+- **Unused shader code is dropped.** The SPIR-V of a shader not used for a minute is released and read back from the shader cache if it is needed again: **115 MiB** freed in play.
+- **No spare blocks in system RAM.** Vulkan keeps a spare block ready only for video memory, not for system RAM.
+- **Automatic low-memory heap.** At startup the game checks how much memory Windows can still promise. If the game would not fit (for example 16 GB of RAM with a small or disabled page file), it commits its heap only as it is used, which measured **1.4 to 2 GB less**. This mode stutters more while loading, so PCs with enough room do not use it. The log says which mode was chosen; `TOTK_LAZY_HEAP=0` or `1` forces either.
 
 ### Two-player co-op and controls
 
@@ -125,7 +134,7 @@ The 30 / 60 / 90 / 120 FPS settings are available, both in the compiler (**Allow
 
 ## Current status
 
-**Current version: 1.0.5 (November 11, 2026).** Version 1.0.5 makes the menu key rebindable (Esc by default, any controller button you choose) and adds Leave unbound for clearing a binding. Version 1.0.4 removed the multi-second freeze when a scene loads for the first time (now a short hitch of about 0.9 s on the test PC). Version 1.0.3 added two-player co-op with per-player input devices, controllers and bindings, plus a live docked/handheld switch. The game boots, plays the opening movies and reaches outdoor exploration and combat. A complete playthrough has not been verified.
+**Current version: 1.0.6 (November 11, 2026).** Version 1.0.6 lowers memory use for 16 GB PCs and removes the long freeze the first time a move plays. Version 1.0.5 made the menu key rebindable (Esc by default, any controller button you choose) and adds Leave unbound for clearing a binding. Version 1.0.4 removed the multi-second freeze when a scene loads for the first time (now a short hitch of about 0.9 s on the test PC). Version 1.0.3 added two-player co-op with per-player input devices, controllers and bindings, plus a live docked/handheld switch. The game boots, plays the opening movies and reaches outdoor exploration and combat. A complete playthrough has not been verified.
 
 ## Current priorities
 
