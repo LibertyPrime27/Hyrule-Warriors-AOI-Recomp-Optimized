@@ -15,6 +15,10 @@ PROC(nvnCommandBufferAddCommandMemory); PROC(nvnCommandBufferAddControlMemory);
 PROC(nvnCommandBufferBeginRecording); PROC(nvnCommandBufferEndRecording);
 PROC(nvnCommandBufferSetMemoryCallback); PROC(nvnCommandBufferSetMemoryCallbackData);
 PROC(nvnCommandBufferSetControlMemoryCallbackEnabled);
+PROC(nvnCommandBufferSetViewports); PROC(nvnCommandBufferSetPointSize);
+PROC(nvnCommandBufferBindBlendState); PROC(nvnCommandBufferBindColorState);
+PROC(nvnCommandBufferBindChannelMaskState); PROC(nvnCommandBufferBindMultisampleState);
+PROC(nvnCommandBufferBindPolygonState); PROC(nvnCommandBufferBindDepthStencilState);
 #define U(p) ((uint64_t)(uintptr_t)(p))
 #define CHECK(x) do { if (!(x)) { fprintf(stderr,"line %d: %s\n",__LINE__,#x);exit(1); } } while (0)
 static uint64_t call(void (*fn)(Cpu *), const uint64_t args[8]) {
@@ -135,9 +139,44 @@ static void pending_replay(void) {
     s=stats();CHECK(!s.copies && !s.zombies && !s.zombie_bytes);
     CALL(nvnCommandBufferFinalize,U(&command));
 }
+static void packed_records(void) {
+    NVNcommandBuffer command;uint8_t storage[64];initialize(&command,storage,sizeof storage);
+    float viewport[64];for(unsigned i=0;i<64;i++)viewport[i]=(float)i+.25f;
+    uint8_t state[24];for(unsigned i=0;i<sizeof state;i++)state[i]=(uint8_t)(0x31+i);
+    void (*setters[])(Cpu *)={nvnp_nvnCommandBufferBindBlendState,nvnp_nvnCommandBufferBindColorState,
+        nvnp_nvnCommandBufferBindChannelMaskState,nvnp_nvnCommandBufferBindMultisampleState,
+        nvnp_nvnCommandBufferBindPolygonState,nvnp_nvnCommandBufferBindDepthStencilState};
+    const size_t lengths[]={sizeof(blend_st),sizeof(color_st),sizeof(chmask_st),sizeof(ms_st),sizeof(poly_st),sizeof(ds_st)};
+    CALL(nvnCommandBufferBeginRecording,U(&command));
+    for(unsigned n=0;n<=16;n++)CALL(nvnCommandBufferSetViewports,U(&command),16-n,n,U(viewport));
+    for(unsigned kind=0;kind<6;kind++)call(setters[kind],(const uint64_t[8]){U(&command),U(state)});
+    Cpu cpu={0};cpu.x[0]=U(&command);float point=2.5f;memcpy(&cpu.v[0],&point,sizeof point);
+    nvnp_nvnCommandBufferSetPointSize(&cpu);
+    uint64_t handle=CALL(nvnCommandBufferEndRecording,U(&command));
+    const uint8_t *cursor=(const uint8_t *)(uintptr_t)handle+8;
+    for(unsigned n=0;n<=16;n++){
+        const op_hdr *h=(const op_hdr *)cursor;CHECK(h->op==OP_VIEWPORTS&&h->size==16+24*n);
+        const p_viewports *v=(const p_viewports *)(cursor+8);CHECK(v->first==(int)(16-n)&&v->n==(int)n);
+        for(unsigned i=0;i<n;i++)CHECK(!memcmp(v->v[i],viewport+4*i,4*sizeof(float)));
+        cursor+=h->size;
+    }
+    for(unsigned kind=0;kind<=6;kind++){
+        const op_hdr *h=(const op_hdr *)cursor;size_t n=kind<6?lengths[kind]:sizeof point;
+        CHECK(h->op==OP_BIND_STATE&&h->size==((12+n+7)&~(size_t)7));
+        const p_bind_state *b=(const p_bind_state *)(cursor+8);CHECK(b->kind==(int)kind);
+        CHECK(!memcmp(b->bytes,kind<6?(const void *)state:(const void *)&point,n));cursor+=h->size;
+    }
+    CHECK(((const op_hdr *)cursor)->op==OP_END&&nvn_handle_bytes(handle)==(uint64_t)(cursor+8-(const uint8_t *)(uintptr_t)handle));
+    CHECK(((cmd_t *)&command)->hw_used==17*400+7*40); // same guest-visible usage as the previous fixed records
+    memset(viewport,0,sizeof viewport);memset(state,0,sizeof state);
+    CHECK(((const p_viewports *)((const uint8_t *)(uintptr_t)handle+32))->v[0][0]==.25f);
+    retire(&command,storage,sizeof storage);CHECK(!stats().copies);
+    CALL(nvnCommandBufferFinalize,U(&command));
+}
 int main(int argc,char **argv) {
     CHECK(argc==2);const char *mode=argv[1];
-    if(!strcmp(mode,"recycling"))bounded_recycling();
+    if(!strcmp(mode,"packed"))packed_records();
+    else if(!strcmp(mode,"recycling"))bounded_recycling();
     else if(!strcmp(mode,"initial"))initial_callback();
     else if(!strcmp(mode,"boundary"))exact_boundary();
     else if(!strcmp(mode,"tail"))partial_tail();

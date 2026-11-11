@@ -626,10 +626,13 @@ static void set_viewports(cmd_t *o, int first, int n, const float *v) {
         rt_log("nvn: SetViewports first %d n %d", first, n);
         return;
     }
-    p_viewports *r = REC(o, OP_VIEWPORTS, p_viewports);
+    // Only n entries are read by replay; keeping all 16 in every one-viewport
+    // recording amplified retained control-ring copies over long sessions.
+    p_viewports *r = RECN(o, OP_VIEWPORTS, p_viewports, v, n);
     r->first = first;
     r->n = n;
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
+    hw_fix(o, (8 + sizeof(p_viewports) + 7) & ~(size_t)7); // preserve existing guest accounting
 }
 // void nvnCommandBufferSetViewports(NVNcommandBuffer *cmd, int first, int n, const float *xywh)
 NVN_API(nvnCommandBufferSetViewports) { set_viewports(cmd_of(c), (int)arg_x(c, 1), (int)arg_x(c, 2), arg_p(c, 3)); }
@@ -703,9 +706,11 @@ NVN_API(nvnCommandBufferBindProgram) {
 // void nvnCommandBufferBind{Blend,Color,ChannelMask,Multisample,Polygon,DepthStencil}State(NVNcommandBuffer *cmd,
 // const NVN*State *state): the state object's bytes are copied (p_bind_state.kind order)
 static void bind_state(const Cpu *c, int kind, size_t n) {
-    p_bind_state *r = REC(cmd_of(c), OP_BIND_STATE, p_bind_state);
+    cmd_t *o = cmd_of(c);
+    p_bind_state *r = rec(o, OP_BIND_STATE, offsetof(p_bind_state, bytes) + n);
     r->kind = kind;
     memcpy(r->bytes, arg_p(c, 1), n);
+    hw_fix(o, (8 + sizeof(p_bind_state) + 7) & ~(size_t)7);
 }
 NVN_API(nvnCommandBufferBindBlendState) { bind_state(c, 0, sizeof(blend_st)); }
 NVN_API(nvnCommandBufferBindColorState) { bind_state(c, 1, sizeof(color_st)); }
@@ -715,10 +720,12 @@ NVN_API(nvnCommandBufferBindPolygonState) { bind_state(c, 4, sizeof(poly_st)); }
 NVN_API(nvnCommandBufferBindDepthStencilState) { bind_state(c, 5, sizeof(ds_st)); }
 // void nvnCommandBufferSetPointSize(NVNcommandBuffer *cmd, float size): recorded as bind-state kind 6 with the float as payload
 NVN_API(nvnCommandBufferSetPointSize) {
-    p_bind_state *r = REC(cmd_of(c), OP_BIND_STATE, p_bind_state);
+    cmd_t *o = cmd_of(c);
+    p_bind_state *r = rec(o, OP_BIND_STATE, offsetof(p_bind_state, bytes) + sizeof(float));
     float s = arg_s(c, 0);
     r->kind = 6;
     memcpy(r->bytes, &s, sizeof s);
+    hw_fix(o, (8 + sizeof(p_bind_state) + 7) & ~(size_t)7);
 }
 // void nvnCommandBufferBindVertexAttribState(NVNcommandBuffer *cmd, int n, const NVNvertexAttribState *states)
 NVN_API(nvnCommandBufferBindVertexAttribState) {

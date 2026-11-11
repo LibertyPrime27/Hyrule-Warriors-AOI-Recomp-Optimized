@@ -22,6 +22,7 @@
 #include "nvn_api.h"
 #include "nvn_pool_index.h"
 #include "vk.h"
+#include "vk_vertex_cache.h"
 #include "platform/platform.h"
 
 // Timestamps for the tracking cost, in ns; qpc_ms converts.
@@ -428,6 +429,7 @@ int vk_mem_inspect(uint64_t addr, uint64_t size, VkMemInspect *out) {
         result.mirror_state = r->mstate;
         result.mirror_present = r->mbuf != VK_NULL_HANDLE;
         result.shadow_storage = r->smap != NULL;
+        result.storage_serial = r->storage_serial;
     } else if (r->kind == POOL_PHYS) {
         if (!r->buf) goto done;
         result.pool_kind = VK_MEM_INSPECT_POOL_PHYSICAL;
@@ -1625,6 +1627,7 @@ static void mirror_write_diag(const PoolRec *r, const VkMemSpan *sp, uint64_t si
 }
 
 void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size) {
+    if (size) vk_vertex_cache_buffer_written(sp, size);
     PoolRec *r = sp->pool;
     if (!r || r->mstate != MS_ON || sp->buffer != r->mbuf || !size) return;
     mirror_write_diag(r, sp, size, (uintptr_t)__builtin_return_address(0));
@@ -1952,8 +1955,10 @@ typedef struct {
 // count, the bytes staged for them and the time threads wait for them are counted here (perf_gpu_line). Each batch owns
 // one timestamp pair, kept with its reused command buffer; batches past UP_PAIRS go untimed.
 #define UP_PAIRS 256
+#define UP_SPARES 8
 static VkQueryPool up_pool;
 static int up_state, up_pairs;   // up_state: 0 not set up, 1 ready, -1 no timestamps
+static int up_free_pairs[UP_PAIRS], up_free_count; // cmd_lock: timestamp slots of discarded completed batches
 static float up_period;
 static volatile int64_t up_gpu_ns, up_timed, up_batches, up_wait_ns, up_bytes;
 
@@ -2023,6 +2028,20 @@ static void free_staging(VkCtx *c, Batch *b) {
     b->nstg = 0;
 }
 
+static int upload_pair_take(void) {
+    if (up_free_count) return up_free_pairs[--up_free_count];
+    return up_pairs < UP_PAIRS ? up_pairs++ : -1;
+}
+
+static void release_batch(VkCtx *c, Batch *b) {
+    // Only completed batches enter here, under cmd_lock. Discard peak-load
+    // command buffers instead of retaining their driver allocations forever.
+    if (b->ts >= 0) up_free_pairs[up_free_count++] = b->ts;
+    vkDestroyFence(c->device, b->fence, NULL);
+    vkFreeCommandBuffers(c->device, cmd_pool, 1, &b->cb);
+    free(b->stg);
+}
+
 // Batches complete in submission order (one queue): retire from the front while their fences are signalled.
 static void retire(VkCtx *c, int wait_all) {
     int k = 0;
@@ -2038,8 +2057,10 @@ static void retire(VkCtx *c, int wait_all) {
         }
         free_staging(c, b);
         done_seq = b->seq;
-        if (nspare == cap_spare) grow((void **)&spare, &cap_spare, sizeof *spare);
-        spare[nspare++] = *b;
+        if (nspare < UP_SPARES) {
+            if (nspare == cap_spare) grow((void **)&spare, &cap_spare, sizeof *spare);
+            spare[nspare++] = *b;
+        } else release_batch(c, b);
     }
     memmove(inflight, inflight + k, (size_t)(ninflight - k) * sizeof *inflight);
     ninflight -= k;
@@ -2083,7 +2104,7 @@ VkCommandBuffer vk_upload_begin(void) {
         vkResetCommandBuffer(open_b.cb, 0);
         vkResetFences(c->device, 1, &open_b.fence);
     } else {
-        open_b.ts = up_pairs < UP_PAIRS ? up_pairs++ : -1;
+        open_b.ts = upload_pair_take();
         VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = cmd_pool,
                                           .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
         VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
@@ -2262,6 +2283,7 @@ void vk_mem_shutdown(void) {
     vkDeviceWaitIdle(c->device);
     vk_queue_unlock();
     vk_texture_shutdown();
+    vk_vertex_cache_shutdown();
     plat_rmutex_lock(&cmd_lock);
     retire(c, 1);
     uint64_t keep = tl_protected;
@@ -2269,13 +2291,14 @@ void vk_mem_shutdown(void) {
     for (int i = 0; i < ndead; i++) dead[i].seq = 0, dead[i].tl = 0;   // the device is idle
     collect_locked(c);
     tl_protected = keep;
-    for (int i = 0; i < nspare; i++) {
-        vkDestroyFence(c->device, spare[i].fence, NULL);
-        free(spare[i].stg);
-    }
+    vk_vertex_cache_pool_shutdown();
+    for (int i = 0; i < nspare; i++) release_batch(c, &spare[i]);
     nspare = 0;
     if (cmd_pool) vkDestroyCommandPool(c->device, cmd_pool, NULL);
     cmd_pool = VK_NULL_HANDLE;
+    if (up_pool) vkDestroyQueryPool(c->device, up_pool, NULL);
+    up_pool = VK_NULL_HANDLE;
+    up_state = up_pairs = up_free_count = 0;
     if (stg_pool) vmaDestroyPool(c->vma, stg_pool);   // after retire: no staging buffer is left in it
     stg_pool = NULL;
     stg_pool_tried = 0;

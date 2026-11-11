@@ -30,6 +30,7 @@
 #include "nvn_indirect_reset.h"
 #include "nvn_rgba8_compare.h"
 #include "vk_quad.h"
+#include "vk_vertex_cache.h"
 #include "game_target.h"
 #include "tex.h"
 #include "vk.h"
@@ -189,6 +190,7 @@ static const VkPipeInfo *rs_last;        // the last lookup
 static const RsList *rs_last_l;
 
 static uint32_t c0_dim[3], c0_binst;     // the dispatch size and base instance of the draw or dispatch being bound
+static int draw_storage_writes;        // potential storage writes of the current ordinary graphics pipeline
 static uint64_t bind_gen = 1;            // bumped by every bind op that writes ex->prog, ubo, ssbo, tex or img
 
 static void cb_done(void *arg) {   // completion thread
@@ -487,6 +489,7 @@ void vk_exec_draw_shutdown(void) {
     nspare_pool = nspare_chunk = 0;
     cur = NULL, cur_fence = 0;
     vk_usnap_shutdown();
+    vk_vertex_cache_shutdown();
     if (Z.ready) {
         vkDestroyBufferView(c->device, Z.zview, NULL);
         vmaDestroyBuffer(c->vma, Z.zbuf, Z.zalloc);
@@ -1610,6 +1613,25 @@ static void gpu_write_binding_diag(const VkExec *ex, int st, const GfxShaderRes 
            bound->size ? "declared-clipped-to-backing-and-device" : "backing-remainder-clipped-to-device", count);
 }
 
+static void fallback_storage_diag(const GfxShaderRes *r, int st, int written,
+                                  uint64_t address, const VkDescriptorBufferInfo *resolved) {
+    enum { LIMIT = 128 };
+    static struct { uint64_t range; uint32_t stage, flags, cbuf, handle; } seen[LIMIT];
+    static unsigned count;
+    if (count == LIMIT || resolved->range < (1u << 20) || !nvn_memory_diagnostics()) return;
+    VkMemInspect backing;
+    if (!vk_mem_inspect(address, resolved->range, &backing) ||
+        backing.pool_kind != VK_MEM_INSPECT_POOL_IMPORT || backing.mirror_state == VK_MEM_INSPECT_MIRROR_ON) return;
+    typeof(seen[0]) key = {resolved->range, (uint32_t)st, r->flags, (uint32_t)r->cbuf_slot, r->handle};
+    for (unsigned i = 0; i < count; i++) if (!memcmp(&key, &seen[i], sizeof key)) return;
+    seen[count++] = key;
+    rt_log("memory-bind: fallback-storage stage=%d written=%d cbuf=%d handle_word=%u flags=%#x "
+           "addr=%#llx offset=%llu range=%llu mirror_state=%d sample=%u/128",
+           st, written, r->cbuf_slot, r->handle, (unsigned)r->flags,
+           (unsigned long long)address, (unsigned long long)backing.offset,
+           (unsigned long long)resolved->range, backing.mirror_state, count);
+}
+
 static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *r, int written) {
     if (!__atomic_load_n(&LIM.ubo_max, __ATOMIC_ACQUIRE)) limits_init();
     uint64_t max = LIM.sbo_max, align = LIM.sbo_align;
@@ -1627,6 +1649,7 @@ static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *
         uint64_t lead = vk_caps.sbuf_align ? b->addr & (vk_caps.sbuf_align - 1) : 0;
         if (bind_range(ex, b->addr - lead, b->size ? b->size + lead : 0, align, max, ubo ? VK_MUSE_UBO : VK_MUSE_SSBO,
                        written, guarded, &bi)) {
+            fallback_storage_diag(r, st, written, b->addr - lead, &bi);
             if (written && bi.buffer != VK_NULL_HANDLE) {
                 gpu_write_binding_diag(ex, st, r, b, &bi, guarded);
                 note_written(ex, b->addr - lead, bi.range);
@@ -2657,12 +2680,17 @@ static void bind_vertex_buffers(VkExec *ex) {
     int dyn = vk_pipeline_vertex_input_dynamic();
     // A stream whose range is the one its bound buffer was resolved from, with no pool or mirror change since
     // (vk_mem_gen, read before any resolve), resolves to that buffer again: most draws change one stream or none.
-    uint64_t gen = vk_mem_gen();
+    uint64_t gen = vk_mem_gen() + vk_vertex_cache_generation();
     int same_gen = B.vb_valid && B.vgen == gen;
     for (int b = 0; b < 17; b++) {
         vb[b] = Z.zbuf, vo[b] = 0, vsz[b] = ZERO_BYTES, vstr[b] = b < 16 ? ex->pipe.vstream[b].stride : 0;
         if (b == VK_PIPE_ZERO_BINDING) continue;
         const NVNbufferRange *r = &ex->vbuf[b];
+        VkDescriptorBufferInfo snapshot;
+        if (vk_vertex_cache_lookup((unsigned)b, &snapshot)) {
+            vb[b] = snapshot.buffer; vo[b] = snapshot.offset; vsz[b] = snapshot.range; vcls[b] = VK_MCLS_DEVICE;
+            continue;
+        }
         if (same_gen && B.vin[b].address == r->address && B.vin[b].size == r->size) {
             vb[b] = B.vb[b], vo[b] = B.vo[b], vsz[b] = B.vsz[b], vcls[b] = B.vcls[b], vpool[b] = B.vpool[b];
             continue;
@@ -3060,6 +3088,22 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     }
     if (pending) return 0;   // a background worker is building it: the draw is skipped until it is ready
     if (!p || !info) return warn_once(W_PIPELINE, "a graphics pipeline could not be created: draws with it are skipped"), 0;
+    draw_storage_writes = pipeline_storage_writes(info);
+    uint32_t cache_streams = 0;
+    if (RT_TARGET_HWAOI && !want_gs && !draw_storage_writes && vk_vertex_cache_active()) {
+        GfxShaderIo inputs[32];
+        uint32_t used = gfx_shader_inputs(vs, inputs);
+        for (unsigned location = 0; location < 16; location++) if (used & (1u << location)) {
+            va_st attribute;
+            memcpy(&attribute, &ex->pipe.vattr[location], sizeof attribute);
+            if (attribute.fmt && attribute.stream < 16) cache_streams |= 1u << attribute.stream;
+        }
+    }
+    if (vk_vertex_cache_prepare(ex, cache_streams)) {
+        vk_exec_pass_begin(ex);
+        vk_exec_draw_new_cb();
+        ex->dirty |= VK_EXEC_DIRTY_ALL;
+    }
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     if (!B.st_valid || memcmp(&B.st, &s, sizeof s)) {
         vk_pipeline_set_dynamic(ex->cb, &s);
@@ -3081,6 +3125,10 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
 // TOTK_TRACE=perf: the draw or dispatch just recorded, with the NVN 2 names of its stages, for the slow-part line
 // (vk_sync.c vk_sync_note). kind: 0 draw, 1 indirect draw, 2 dispatch, 3 indirect dispatch.
 static void note_work(const VkExec *ex, int kind, uint64_t work) {
+    // Compute descriptors are rebuilt for every dispatch; bind_range marks
+    // their writable resolved ranges before execution. Graphics may reuse a
+    // descriptor build, so retain global invalidation after a writing draw.
+    if (kind < 2 && draw_storage_writes) vk_vertex_cache_written();
     if (!vk_sync_noting() || !ex->prog) return;
     const uint8_t *ctl, *code;
     uint32_t len;

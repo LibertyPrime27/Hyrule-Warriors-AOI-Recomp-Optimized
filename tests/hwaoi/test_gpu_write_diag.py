@@ -43,6 +43,8 @@ typedef struct {PoolRec *r;uint64_t off,size;} MRange;
 static MRange *wbl,last_range;static int nwbl,cwbl;
 static unsigned descriptor_lines,mirror_lines,descriptor_limits,mirror_limits;
 static unsigned config_reads,stage_reads,origin_reads,hash_reads,range_calls;
+static unsigned vertex_invalidations;
+void vk_vertex_cache_buffer_written(const VkMemSpan *span,uint64_t size) {CHECK(span && size);vertex_invalidations++;}
 static const char *setting;
 static char last_log[2048];
 const char *cfg_get(const char *key) {CHECK(!strcmp(key,"TOTK_GPU_WRITE_DIAG"));config_reads++;return setting;}
@@ -119,6 +121,7 @@ int main(int argc,char **argv) {
  span.buffer=pool.mbuf;vk_mem_gpu_wrote(&span,0);CHECK(!range_calls);
  span.offset=17;vk_mem_gpu_wrote(&span,15);CHECK(range_calls==1 && last_range.r==&pool && last_range.off==17 && last_range.size==15);
  vk_mem_gpu_wrote(&span,LARGE);CHECK(range_calls==2 && last_range.off==17 && last_range.size==LARGE);
+ CHECK(vertex_invalidations==5); // every nonempty write, including imported backing
  CHECK(config_reads==2);if(!on)CHECK(!stage_reads && !origin_reads && !hash_reads);
  puts("GPU write diagnostic checks passed");return 0;
 }

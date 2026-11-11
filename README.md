@@ -19,7 +19,7 @@ The game's ARM64 code is translated to C ahead of time and compiled together wit
 
 This project stands on the work of others:
 
-- **[HWAoI Recomp](https://github.com/Alano6678/hwaoi-recomp) by Alano6678.** The original Hyrule Warriors: Age of Imprisonment recompilation: the game profile, recompiler adaptation, NVN 2 work, compiler front end and everything that first got the game booting and playable. This repository is a fork of it.
+- **[HWAoI Recomp](https://github.com/Alano6678/hwaoi-recomp) by Alano6678.** The original Hyrule Warriors: Age of Imprisonment recompilation: the game profile, recompiler adaptation, NVN 2 work, compiler front end and everything that first got the game booting and playable. This repository is a fork of it, and includes its November 11, 2026 memory update by Ksora25.
 - **[DKB Recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp) by Lucas-blip-png.** The *Donkey Kong Bananza* static recompilation that HWAoI Recomp is built on. It provides the recompiler, runtime, Vulkan/NVN layer and shader translator. The imported revision is pinned in [config/upstream.json](config/upstream.json).
 - **[Savage Wind Recomp](https://github.com/Revivedx/SavageWindRecomp).** Credited for menu adaptations.
 
@@ -41,6 +41,15 @@ Combat is now CPU-bound rather than stalled on the GPU.
 
 - **Shader pipelines build in the background**, from a pipeline key cache recorded on earlier runs. Draws whose pipeline is not ready yet are skipped instead of blocking the frame. This removes the emulator-style shader stutter and the long black stalls.
 - **Game files are verified once, not on every launch.** RomFS hash verification is saved in `romfs-verified.bin`, so later launches skip re-hashing unchanged game data. Scene loads are much shorter.
+
+### Memory use (from upstream)
+
+This fork includes the upstream HWAoI Recomp memory update (November 11, 2026):
+
+- **Smaller command records.** Viewport and fixed-state command records are packed to the size they use.
+- **Bounded caches.** At most eight completed upload batches are kept, timestamp slots are reused, and the query pool is released at shutdown.
+- **Measured upstream:** in the 1080p / 60 FPS opening scene, the retained command-copy peak dropped from **1128 to 1013 MiB** and the process private-memory peak fell by **137 MiB**, with no FPS change.
+- **Optional vertex cache.** An opt-in read-only vertex snapshot cache (`TOTK_VERTEX_CACHE`) is included but **off by default**, because its low-memory path is still too slow for normal play.
 
 ### DLC and update support
 
@@ -78,6 +87,7 @@ The 30 / 60 / 90 / 120 FPS settings are available, both in the compiler (**Allow
 | ✅ | Opening movies and audio | Both opening movies play through; audio and voices work. |
 | ✅ | Movement and camera | Keyboard/mouse and SDL controller input work. |
 | ✅ | Update 1.0.3 and DLC | Merged or separate update/DLC NUPs compile; add-on content mounts in game. |
+| 🔧 | Memory use | Upstream's smaller command records and bounded upload/timestamp caches are included. The vertex-cache experiment stays off by default. |
 | ✅ | Combat performance | About 57 FPS average in crowded fights on the test PC (previously 13–18). |
 | 🔧 | Rendering | Outdoor scenes and combat render. Some reported crash scenes await retesting. |
 | 🧪 | 90 / 120 FPS | Selectable, but they speed up gameplay. Use 60 FPS plus frame generation. |
