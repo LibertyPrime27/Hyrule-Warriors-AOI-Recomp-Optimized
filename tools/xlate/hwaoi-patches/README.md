@@ -50,3 +50,16 @@ identity and requires `--probe-hwaoi-typed-storage-address` before deployment.
 It checks carry/refusal cases, predicate phis with copies, and independent
 64-bit arithmetic oracles. This source addition still requires compilation and
 real combat validation; it is not evidence of a measured FPS improvement.
+
+## 0004: explicit-level texel fetches of buffer textures
+
+HWAoI's deferred-light shaders read their buffer textures (light lists, light
+parameters, cluster index tables) with `TLD 1D .LL`: an integer-coordinate 1D
+texel fetch with an explicit level of detail, which the hardware ignores for a
+buffer. Upstream asks the host for the sampler type only without a level, so
+these fetches were emitted as 1D-as-2D reads of a texture that does not exist
+and every local light contributed zero; caves lit only by torches and crystals
+rendered almost black. With this patch an explicit-level, non-bindless 1D
+integer fetch asks the host and becomes a texel-buffer fetch (level dropped)
+when the bound descriptor is a buffer texture. Bindless explicit-level fetches
+keep the 1D type: nothing distinguishes them from a mipmapped 1D texture.

@@ -1994,7 +1994,7 @@ void vk_upload_perf(uint64_t *gpu_ns, uint64_t *timed, uint64_t *batches, uint64
     *bytes = (uint64_t)plat_xchg64(&up_bytes, 0);
 }
 
-enum { DEAD_IMAGE = 1, DEAD_IMAGE_VMA, DEAD_VIEW, DEAD_BUFFER_VMA };
+enum { DEAD_IMAGE = 1, DEAD_IMAGE_VMA, DEAD_VIEW, DEAD_BUFFER_VMA, DEAD_BUFFER_VIEW };
 typedef struct { int kind; uint64_t handle; VmaAllocation alloc; uint64_t seq, tl; } Dead;
 
 static PlatRMutex cmd_lock;
@@ -2079,6 +2079,7 @@ static void collect_locked(VkCtx *c) {
         case DEAD_IMAGE_VMA: vmaDestroyImage(c->vma, (VkImage)(uintptr_t)d->handle, d->alloc); break;
         case DEAD_VIEW: vkDestroyImageView(c->device, (VkImageView)(uintptr_t)d->handle, NULL); break;
         case DEAD_BUFFER_VMA: vmaDestroyBuffer(c->vma, (VkBuffer)(uintptr_t)d->handle, d->alloc); break;
+        case DEAD_BUFFER_VIEW: vkDestroyBufferView(c->device, (VkBufferView)(uintptr_t)d->handle, NULL); break;
         }
     }
     ndead = k;
@@ -2240,6 +2241,7 @@ void vk_defer_image(VkImage img, VmaAllocation alloc) {
     if (img) defer(alloc ? DEAD_IMAGE_VMA : DEAD_IMAGE, (uint64_t)(uintptr_t)img, alloc);
 }
 void vk_defer_view(VkImageView view) { if (view) defer(DEAD_VIEW, (uint64_t)(uintptr_t)view, NULL); }
+void vk_defer_buffer_view(VkBufferView view) { if (view) defer(DEAD_BUFFER_VIEW, (uint64_t)(uintptr_t)view, NULL); }
 void vk_defer_buffer(VkBuffer buf, VmaAllocation alloc) {
     if (buf) defer(DEAD_BUFFER_VMA, (uint64_t)(uintptr_t)buf, alloc);
 }

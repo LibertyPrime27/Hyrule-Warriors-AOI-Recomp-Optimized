@@ -252,7 +252,8 @@ static uint8_t *scratch(VkExec *ex, uint64_t size, VkBuffer *buf, VkDeviceSize *
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n,
                                  .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-                                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+                                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                          VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT};   // buffer textures (texel_view)
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
                                       .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
         VmaAllocationInfo info;
@@ -433,6 +434,8 @@ static VkImageView storage_dummy(int di, int code) {
     return Z.img[di].sview;
 }
 
+static void texel_views_shutdown(VkCtx *c);   // buffer texture views (texel_view_of)
+
 static void dummies_init(void) {
     if (Z.ready) return;
     VkCtx *c = vk_ctx();
@@ -490,6 +493,7 @@ void vk_exec_draw_shutdown(void) {
     cur = NULL, cur_fence = 0;
     vk_usnap_shutdown();
     vk_vertex_cache_shutdown();
+    texel_views_shutdown(c);
     if (Z.ready) {
         vkDestroyBufferView(c->device, Z.zview, NULL);
         vmaDestroyBuffer(c->vma, Z.zbuf, Z.zalloc);
@@ -1114,7 +1118,13 @@ static uint8_t type_of_handle(const VkExec *ex, uint64_t h) {   // texture lock 
     view_t v;
     int hv;
     const VkTexImage *img = h ? vk_texture_by_id_locked(&ex->tex_pool, (int)(h & 0xfffff), &v, &hv) : NULL;
-    return img ? (uint8_t)gfx_type_of(img, &v, hv) : 0;
+    if (img) return (uint8_t)gfx_type_of(img, &v, hv);
+    // A buffer texture has no image: answering 0 translated its texel fetches as 2D reads of a dummy image.
+    uint64_t addr;
+    int format;
+    uint32_t elements;
+    return h && vk_texture_slot_buffer_locked(&ex->tex_pool, (int)(h & 0xfffff), &addr, &format, &elements)
+               ? GFX_TEX_BUFFER : 0;
 }
 
 // The answers of stage st for the slots in mask; the types of other slots stay zero.
@@ -1254,6 +1264,110 @@ static int bind_range(VkExec *ex, uint64_t addr, uint64_t size, uint64_t align, 
     vk_mem_count(VK_MCLS_SCRATCH, use, n);
     *out = (VkDescriptorBufferInfo){b, o, n};
     return 1;
+}
+
+// ---- Buffer textures (NVN_TEXTURE_TARGET_BUFFER): texel buffer views over the descriptor's storage
+// HWAoI keeps its light lists, light parameters and cluster indices in buffer textures (RGBA32F, R32UI, R32F arrays up
+// to a million elements). Before these were bound every read returned zero and caves lit only by local lights came out
+// black. The storage resolves like a storage buffer (bind_range), so texels a compute pass wrote on the GPU are seen;
+// views are cached per (buffer, offset, range, format) in a direct-mapped table, a replaced one retired after the GPU.
+
+static uint32_t texel_bytes(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_SNORM: case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SINT: return 1;
+    case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8_SNORM: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8_SINT:
+    case VK_FORMAT_R16_UNORM: case VK_FORMAT_R16_SNORM: case VK_FORMAT_R16_UINT: case VK_FORMAT_R16_SINT:
+    case VK_FORMAT_R16_SFLOAT: return 2;
+    case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SNORM: case VK_FORMAT_R8G8B8A8_UINT:
+    case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16_SNORM: case VK_FORMAT_R16G16_UINT:
+    case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT:
+    case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_A2B10G10R10_UNORM_PACK32: case VK_FORMAT_A2B10G10R10_UINT_PACK32:
+    case VK_FORMAT_B10G11R11_UFLOAT_PACK32: return 4;
+    case VK_FORMAT_R16G16B16A16_UNORM: case VK_FORMAT_R16G16B16A16_SNORM: case VK_FORMAT_R16G16B16A16_UINT:
+    case VK_FORMAT_R16G16B16A16_SINT: case VK_FORMAT_R16G16B16A16_SFLOAT: case VK_FORMAT_R32G32_UINT:
+    case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32_SFLOAT: return 8;
+    case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_R32G32B32A32_SINT: case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
+    default: return 0;
+    }
+}
+
+// The device's texel buffer limits and whether f may back a uniform (storage: storage) texel buffer, cached.
+static int texel_format_ok(VkFormat f, int storage, VkDeviceSize *align, uint32_t *max_elements) {
+    static VkDeviceSize a;
+    static uint32_t mx;
+    static uint8_t have[256], ok[2][256];
+    VkCtx *c = vk_ctx();
+    if (!c) return 0;
+    if (!mx) {
+        VkPhysicalDeviceProperties p;
+        vkGetPhysicalDeviceProperties(c->phys, &p);
+        a = p.limits.minTexelBufferOffsetAlignment ? p.limits.minTexelBufferOffsetAlignment : 1;
+        mx = p.limits.maxTexelBufferElements;
+    }
+    *align = a, *max_elements = mx;
+    if ((unsigned)f >= 256) return 0;
+    if (!have[f]) {
+        VkFormatProperties p;
+        vkGetPhysicalDeviceFormatProperties(c->phys, f, &p);
+        ok[0][f] = !!(p.bufferFeatures & VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT);
+        ok[1][f] = !!(p.bufferFeatures & VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT);
+        have[f] = 1;
+    }
+    return ok[storage][f];
+}
+
+#define TBV_SLOTS 2048
+static struct { VkBuffer buf; VkDeviceSize off, range; VkFormat fmt; VkBufferView view; } TBV[TBV_SLOTS];
+static uint64_t tbv_made, tbv_failed;
+
+static void texel_views_shutdown(VkCtx *c) {   // the device is idle
+    for (int i = 0; i < TBV_SLOTS; i++)
+        if (TBV[i].view) vkDestroyBufferView(c->device, TBV[i].view, NULL);
+    memset(TBV, 0, sizeof TBV);
+}
+
+static VkBufferView texel_view_of(VkBuffer buf, VkDeviceSize off, VkDeviceSize range, VkFormat fmt) {
+    uint64_t h = ((uint64_t)(uintptr_t)buf * 0x9e3779b97f4a7c15ull) ^ (off * 0xff51afd7ed558ccdull) ^
+                 (range * 0xc4ceb9fe1a85ec53ull) ^ (uint64_t)fmt;
+    typeof(TBV[0]) *e = &TBV[(h ^ h >> 29) % TBV_SLOTS];
+    if (e->view && e->buf == buf && e->off == off && e->range == range && e->fmt == fmt) return e->view;
+    VkBufferViewCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, .buffer = buf, .format = fmt,
+                                 .offset = off, .range = range};
+    VkBufferView v;
+    if (vkCreateBufferView(vk_ctx()->device, &ci, NULL, &v) != VK_SUCCESS) {
+        if (!tbv_failed++) rt_log("vk: a buffer texture view (format %d, %llu bytes) could not be created; zero bound",
+                                  (int)fmt, (unsigned long long)range);
+        return VK_NULL_HANDLE;
+    }
+    if (e->view) vk_defer_buffer_view(e->view);   // command buffers recorded so far may still use it
+    *e = (typeof(*e)){buf, off, range, fmt, v};
+    if (!tbv_made++) rt_log("vk: buffer textures are bound as texel buffer views");
+    return v;
+}
+
+// The texel buffer view for handle h of a buffer texture slot, or VK_NULL_HANDLE (the caller binds the zero view).
+static VkBufferView texel_view(VkExec *ex, uint64_t h, int storage) {
+    uint64_t addr;
+    int nvn_format;
+    uint32_t elements;
+    vk_texture_lock();
+    int found = h && vk_texture_slot_buffer_locked(&ex->tex_pool, (int)(h & 0xfffff), &addr, &nvn_format, &elements);
+    vk_texture_unlock();
+    if (!found) return VK_NULL_HANDLE;
+    TexVkFormat tf;
+    if (!tex_vk_format(nvn_format, &tf) || tf.expand_rgb || tf.astc_bw) return VK_NULL_HANDLE;
+    VkDeviceSize align;
+    uint32_t max_elements, bytes = texel_bytes(tf.vk);
+    if (!bytes || !texel_format_ok(tf.vk, storage, &align, &max_elements)) return VK_NULL_HANDLE;
+    if (elements > max_elements) elements = max_elements;
+    VkDescriptorBufferInfo bi;
+    if (!bind_range(ex, addr, (uint64_t)elements * bytes, align, (uint64_t)max_elements * bytes,
+                    storage ? VK_MUSE_SSBO : VK_MUSE_UBO, storage, storage, &bi) || bi.buffer == VK_NULL_HANDLE)
+        return VK_NULL_HANDLE;
+    VkDeviceSize range = bi.range / bytes * bytes;
+    if (!range) return VK_NULL_HANDLE;
+    if (storage) note_written(ex, addr, bi.range);
+    return texel_view_of(bi.buffer, bi.offset, range, tf.vk);
 }
 
 static void c0_table(uint8_t *at, const p_bind_buf b[16]) {
@@ -2503,10 +2617,15 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             int img = b->kind == GFX_RES_IMG;
             if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || b->type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
                 kind = 2;
-                for (uint32_t k = 0; k < cnt; k++) {   // buffer textures are not replayed yet
+                for (uint32_t k = 0; k < cnt; k++) {   // buffer textures: a view of their storage, else the zero view
+                    int slot = r->slot + (int)k;
+                    uint64_t h = img ? (slot >= 0 && slot < 32 ? ex->img[st][slot] : 0)
+                                     : (slot >= 0 && slot < 128 ? ex->tex[st][slot] : 0);
+                    VkBufferView view = texel_view(ex, h, img);
+                    if (view == VK_NULL_HANDLE) view = Z.zview;
                     o[k].w[0] = 0, o[k].w[1] = 0, o[k].w[2] = 0;
-                    o[k].view = Z.zview;
-                    if (need_w) bv[nd + k] = Z.zview;
+                    o[k].view = view;
+                    if (need_w) bv[nd + k] = view;
                 }
             } else {
                 kind = 1;

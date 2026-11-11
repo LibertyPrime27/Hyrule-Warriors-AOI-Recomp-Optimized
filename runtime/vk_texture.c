@@ -1175,6 +1175,31 @@ const VkTexImage *vk_texture_by_id_locked(const dpool_ref *pool, int id, view_t 
     return e ? &e->pub : NULL;
 }
 
+int vk_texture_slot_buffer_locked(const dpool_ref *pool, int id, uint64_t *addr, int *format, uint32_t *elements) {
+    DescSlot *d = descriptor_slot(pool, id, 1u << 20, 0);
+    if (!d || d->kind != DESC_TEXTURE) return 0;
+    const tex_t *t = &d->u.tex.t;
+    if (t->d.target != NVN_TEXTURE_TARGET_BUFFER || !t->mem || !t->d.width) return 0;
+    *addr = (uint64_t)(uintptr_t)t->mem, *format = t->d.format, *elements = t->d.width;
+    return 1;
+}
+
+// vk_dump: why slot id resolves to no texture: never registered, another kind, or the registered descriptor (storage,
+// format, target and size) that no texture entry could be made for.
+void vk_texture_slot_why(const dpool_ref *pool, int id, char *out, size_t cap) {
+    lock();
+    DescSlot *d = descriptor_slot(pool, id, 1u << 20, 0);
+    if (!d) snprintf(out, cap, "never registered");
+    else if (d->kind != DESC_TEXTURE) snprintf(out, cap, "slot holds descriptor kind %u, not a texture", d->kind);
+    else {
+        const tex_t *t = &d->u.tex.t;
+        snprintf(out, cap, "registered: mem %p target %d nvn-fmt %#x %ux%ux%u levels %u flags %#x samples %d%s",
+                 (void *)t->mem, t->d.target, t->d.format, t->d.width, t->d.height, t->d.depth, t->d.levels,
+                 t->d.flags, t->d.samples, t->mem ? "" : " (no storage)");
+    }
+    unlock();
+}
+
 // vk_dump: the swizzle selectors of the descriptor registered in slot id; 0 when the slot is empty.
 int vk_texture_slot_swz(const dpool_ref *pool, int id, uint8_t swz[4]) {
     lock();

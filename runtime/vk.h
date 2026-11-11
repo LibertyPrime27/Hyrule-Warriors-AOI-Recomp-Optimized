@@ -276,6 +276,7 @@ VkQueryPool vk_ts_pool(uint32_t pairs, float *period);
 // Deferred destruction: freed once the upload batches recorded so far and the timeline value last noted have completed.
 void vk_defer_image(VkImage img, VmaAllocation alloc);   // alloc NULL: vkDestroyImage only
 void vk_defer_view(VkImageView view);
+void vk_defer_buffer_view(VkBufferView view);   // destroyed once the GPU work recorded so far has completed
 void vk_exec_image_gone(VkImage image);   // destroy_tex, texture lock held: the replay's views of image go with it
 void vk_defer_buffer(VkBuffer buf, VmaAllocation alloc);
 // ---- ASTC (vk_astc.c). TOTK_ASTC = auto | gpu | native | cpu | check; see vk_astc.c.
@@ -365,6 +366,10 @@ int vk_texture_small_dirty(void);                   // a small mirrored target h
 void vk_texture_write_back_small(uint64_t fence);   // writes those rendered by work up to fence back to storage
 void vk_texture_debug(const VkTexImage *img, uint32_t *uploads, int *last_change, int *pages_written);   // vk_dump
 int vk_texture_slot_swz(const dpool_ref *pool, int id, uint8_t swz[4]);
+void vk_texture_slot_why(const dpool_ref *pool, int id, char *out, size_t cap);   // vk_dump: why a slot resolves to nothing
+// A buffer texture (NVN_TEXTURE_TARGET_BUFFER) registered in slot id, texture lock held: its storage address, NVN
+// format and element count. 0 when the slot holds no buffer texture.
+int vk_texture_slot_buffer_locked(const dpool_ref *pool, int id, uint64_t *addr, int *format, uint32_t *elements);
 int vk_texture_read_image(const tex_t *t, const view_t *v, const NVNcopyRegion *r, uint8_t *dst, uint64_t row,
                           uint64_t img);            // always from the image (GPU copy, waited for); 0 on failure
 int vk_texture_cpu_stale(uint64_t addr, uint64_t size);    // a GPU-written mirrored texture there has stale storage

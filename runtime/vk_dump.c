@@ -640,7 +640,12 @@ static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) 
             view_t v;
             int hv = 0;
             const VkTexImage *t = vk_texture_by_id(&ex->tex_pool, NVN_HANDLE_TEX(h), &v, &hv);
-            if (!t) { sp(b, "tex %d unresolved (dummy)\n", NVN_HANDLE_TEX(h)); continue; }
+            if (!t) {
+                char why[200];
+                vk_texture_slot_why(&ex->tex_pool, NVN_HANDLE_TEX(h), why, sizeof why);
+                sp(b, "tex %d unresolved (dummy): %s\n", NVN_HANDLE_TEX(h), why);
+                continue;
+            }
             static const char *vt[] = {"1D", "2D", "3D", "cube", "1DArray", "2DArray", "cubeArray"};
             sp(b, "tex %d %s(%d) %ux%ux%u levels %u layers %u image %s", NVN_HANDLE_TEX(h), fmt_name(t->format, fn),
                (int)t->format, t->width, t->height, t->depth, t->levels, t->layers,
