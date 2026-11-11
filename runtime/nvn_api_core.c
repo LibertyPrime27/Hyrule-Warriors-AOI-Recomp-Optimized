@@ -65,6 +65,7 @@ static void ov_memcpy(Cpu *c) {
 HOST_OVERRIDE("memcpy", ov_memcpy);
 
 __attribute__((weak)) void nvn_submit_prepare(const uint64_t *handles, int n) { (void)handles, (void)n; }
+__attribute__((weak)) void nvn_sync_replay(int begin) { (void)begin; }
 __attribute__((weak)) void nvn_submit_prepare_async(const uint64_t *handles, uint64_t *out, int n) {
     memcpy(out, handles, sizeof *out * (size_t)n);
 }
@@ -631,9 +632,11 @@ NVN_API(nvnQueueSubmitCommands) {
     NVN_BLOCKING();
     uint64_t no = __atomic_add_fetch(&lod_entered, 1, __ATOMIC_SEQ_CST);
     q->submits++;
+    int sync = !gfx_replay_async();
+    if (sync) nvn_sync_replay(1);   // copies this submit reads stay whole until its replay is done
     NvnFenceBatch *recorded_fences = nvn_submit_capture_fences(h, n);
     uint64_t f;
-    if (gfx_replay_async()) {
+    if (!sync) {
         // Prepare and queue under one lock: submit numbers follow queue order (gfx_replayed_submits).
         static PlatMutex submit_lock = PLAT_MUTEX_INIT;
         uint64_t local[32], *hs = n <= 32 ? local : malloc(sizeof *hs * (size_t)n);
@@ -648,6 +651,7 @@ NVN_API(nvnQueueSubmitCommands) {
         nvn_submit_prepare(h, n);
         f = gfx_backend()->submit(h, n, submitted);
         nvn_submit_publish_fences(recorded_fences, f);
+        nvn_sync_replay(0);
     }
     uint64_t prev = __atomic_load_n(&last_fence, __ATOMIC_RELAXED);
     while (f > prev && !__atomic_compare_exchange_n(&last_fence, &prev, f, 1, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {}

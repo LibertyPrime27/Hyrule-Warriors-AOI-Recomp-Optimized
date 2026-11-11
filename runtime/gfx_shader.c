@@ -91,8 +91,10 @@ struct GfxShader {
     struct GfxShader *next;
     uint8_t key[32];
     uint8_t iid[32];                                       // input id (see the keys at the top)
-    uint32_t *spirv;
+    uint32_t *spirv;                                       // NULL while trimmed (spirv_trim_main); atomic access
     uint64_t words;
+    volatile uint64_t used_ms;                             // plat_now_ms of the last gfx_shader_spirv
+    uint8_t spirv_from;                                    // where a trimmed module is read back: 1 pack, 2 loose file
     char *reflection;                                      // the service's .res.json text, parsed into the fields below
     uint64_t reflection_size;
     // Reflection (reflect(), once per shader before it enters the cache)
@@ -111,6 +113,7 @@ struct GfxShader {
 };
 
 static PlatMutex cache_lock = PLAT_MUTEX_INIT;                  // memory cache
+static uint64_t cache_gen;                                 // under cache_lock: bumped when every entry is freed
 static GfxShader *buckets[BUCKETS];
 static UseEnt *use_buckets[BUCKETS];                       // under cache_lock
 static volatile int64_t n_requests, n_hits, n_failures, n_keys, n_xlated;   // n_keys: memory cache entries
@@ -564,7 +567,11 @@ static void shader_free(GfxShader *s) {
 static int reflect(GfxShader *s, int require_c0);
 
 // Inserts s, or frees it and returns the entry another thread inserted first.
+static void spirv_trim_start(void);
+
 static GfxShader *mem_insert(GfxShader *s) {
+    spirv_trim_start();
+    s->used_ms = plat_now_ms();
     plat_mutex_lock(&cache_lock);
     GfxShader **head = &buckets[(s->key[0] | s->key[1] << 8) % BUCKETS], *r = *head;
     while (r && memcmp(r->key, s->key, 32)) r = r->next;
@@ -1597,6 +1604,7 @@ uint64_t gfx_shader_cache_hits(void) { return (uint64_t)n_hits; }     // gets an
 // Drops the memory cache (the probe uses it to prove the disk cache). Pointers handed out before are invalid.
 void gfx_shader_drop_memory(void) {
     plat_mutex_lock(&cache_lock);
+    cache_gen++;   // a SPIR-V trim pass holding entries from before this gives them up
     for (int i = 0; i < BUCKETS; i++) {
         for (GfxShader *s = buckets[i], *n; s; s = n) {
             n = s->next;
@@ -2169,10 +2177,15 @@ static void note_failed(const uint8_t key[32]) {
     plat_mutex_unlock(&X.lock);
 }
 
+// A compute shader translated ahead of its first dispatch (gfx_shader_prefetch): vk_pipeline.c builds its pipeline in
+// the background too, so a move's first effects do not wait seconds for the driver. Weak: builds without it do nothing.
+__attribute__((weak)) void gfx_shader_prefetched(const GfxShader *s) { (void)s; }
+
 // Translates a job taken off the queue, then clears its key from X.waits (or marks it failed) and frees it.
 static void job_run(XJob *j) {
     const GfxShader *s = translate(&j->r, j->stage, j->control, j->code, &j->a);
     if (j->prefetch) alt_put(j->r.code_hash, &j->a, s);
+    if (j->prefetch && s && j->stage == GFX_STAGE_CS) gfx_shader_prefetched(s);
     plat_mutex_lock(&X.lock);
     XWait **w = wait_slot(j->r.key), *e = *w;
     if (e && s) *w = e->next, free(e);
@@ -2333,6 +2346,7 @@ int gfx_shader_prefetch(int stage, const uint8_t *control, const uint8_t *code, 
     const GfxShader *s = get_async_one(r, stage, control, code, a, &pending);
     t_prefetch = 0;
     alt_put(r.code_hash, a, s);
+    if (s && stage == GFX_STAGE_CS) gfx_shader_prefetched(s);   // already translated: its pipeline can be built now
     return pending;
 }
 
@@ -2489,9 +2503,163 @@ void gfx_shader_prewarm(const uint8_t (*iids)[32], size_t n, const GfxShader **o
            (unsigned long long)((uint64_t)n_failures - fail0), procs, k, (double)plat_now_ms() - t0);
     free(w.other);
 }
-const uint32_t *gfx_shader_spirv(const GfxShader *s, uint64_t *words) {
+// ---- SPIR-V trimming. A shader's SPIR-V is read only while pipelines are built from it (vk_pipeline.c, the shader
+// probes), and once a scene's pipelines exist most modules sit unread: hundreds of MiB of host memory. A low-priority
+// thread drops the module of a shader unread for SPIRV_IDLE_MS, after reading the same bytes back from the pack or its
+// loose file (so a later read gets exactly them), and gfx_shader_spirv reads it back when it is asked for again. A
+// caller keeps the returned pointer only while it builds one pipeline, so the dropped buffer is freed SPIRV_GRACE_MS
+// later, not at once. The reflection, layout and every other field stay. TOTK_SPIRV_TRIM=0 turns it off.
+#define SPIRV_IDLE_MS 60000u
+#define SPIRV_GRACE_MS 30000u
+#define SPIRV_SCAN_MS 10000u
+#define SPIRV_MIN_BYTES 4096u                              // smaller modules are not worth a file read
+
+typedef struct Retired { struct Retired *next; uint32_t *spirv; uint64_t at_ms, bytes; } Retired;
+static struct {
+    PlatMutex lock;                                        // read-backs, and the retired list
+    Retired *retired;
+    volatile int64_t trimmed, trimmed_bytes, read_back, resident_bytes, calls;
+    int started, off;
+    void *volatile caller[8];                              // the first callers of gfx_shader_spirv, and their calls
+    volatile int64_t caller_calls[8];
+} T = {PLAT_MUTEX_INIT};
+
+static uint8_t *spirv_read(const uint8_t key[32], int from, uint64_t *size) {
+    char hex[65], p[PATH_CAP + 80];
+    key_hex(key, hex);
+    snprintf(p, PATH_CAP + 80, "%s/%s.spv", cache_dir, hex);
+    uint8_t *spv = from == 1 ? (pack_n ? pack_read(PACK_SPV, key, size) : NULL) : read_file(p, size);
+    uint32_t magic = 0;
+    if (spv && *size >= 20) memcpy(&magic, spv, 4);
+    if (spv && (*size % 4 || magic != 0x07230203)) free(spv), spv = NULL;
+    return spv;
+}
+
+static void spirv_trim_pass(void) {
+    uint64_t now = plat_now_ms();
+    plat_mutex_lock(&T.lock);
+    for (Retired **r = &T.retired; *r;) {
+        if (now - (*r)->at_ms < SPIRV_GRACE_MS) { r = &(*r)->next; continue; }
+        Retired *dead = *r;
+        *r = dead->next;
+        free(dead->spirv), free(dead);
+    }
+    plat_mutex_unlock(&T.lock);
+    enum { BATCH = 256 };
+    GfxShader *pick[BATCH];
+    int n = 0;
+    int64_t resident = 0;
+    plat_mutex_lock_shared(&cache_lock);
+    uint64_t gen = cache_gen;
+    for (int i = 0; i < BUCKETS; i++)
+        for (GfxShader *s = buckets[i]; s; s = s->next) {
+            if (!__atomic_load_n(&s->spirv, __ATOMIC_ACQUIRE)) continue;
+            resident += (int64_t)s->words * 4;
+            if (n < BATCH && s->words * 4 >= SPIRV_MIN_BYTES &&
+                now - __atomic_load_n(&s->used_ms, __ATOMIC_RELAXED) >= SPIRV_IDLE_MS)
+                pick[n++] = s;
+        }
+    plat_mutex_unlock_shared(&cache_lock);
+    __atomic_store_n(&T.resident_bytes, resident, __ATOMIC_RELAXED);
+    for (int i = 0; i < n; i++) {
+        GfxShader *s = pick[i];
+        plat_mutex_lock_shared(&cache_lock);   // held for one entry at a time: inserts wait at most one file read
+        if (cache_gen != gen) {
+            plat_mutex_unlock_shared(&cache_lock);
+            break;
+        }
+        uint32_t *cur = __atomic_load_n(&s->spirv, __ATOMIC_ACQUIRE);
+        for (int from = 1; cur && from <= 2; from++) {
+            uint64_t size = 0;
+            uint8_t *disk = spirv_read(s->key, from, &size);
+            int same = disk && size == s->words * 4 && !memcmp(disk, cur, size);
+            free(disk);
+            if (!same) continue;
+            Retired *r = malloc(sizeof *r);
+            if (!r) break;
+            s->spirv_from = (uint8_t)from;
+            // A read since the pick keeps the module: it may be building a pipeline right now.
+            if (plat_now_ms() - __atomic_load_n(&s->used_ms, __ATOMIC_RELAXED) < SPIRV_IDLE_MS ||
+                !__atomic_compare_exchange_n(&s->spirv, &cur, NULL, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                free(r);
+                break;
+            }
+            *r = (Retired){.spirv = cur, .at_ms = plat_now_ms(), .bytes = s->words * 4};
+            plat_mutex_lock(&T.lock);
+            r->next = T.retired, T.retired = r;
+            plat_mutex_unlock(&T.lock);
+            plat_inc64(&T.trimmed);
+            __atomic_add_fetch(&T.trimmed_bytes, (int64_t)r->bytes, __ATOMIC_RELAXED);
+            break;
+        }
+        plat_mutex_unlock_shared(&cache_lock);
+    }
+    static uint64_t last_log;
+    if (now - last_log >= 60000) {
+        last_log = now;
+        char who[256] = "";
+        for (int i = 0, at = 0; i < 8 && T.caller[i] && at < (int)sizeof who - 40; i++)
+            at += snprintf(who + at, sizeof who - (size_t)at, " %p:%lld", T.caller[i], (long long)T.caller_calls[i]);
+        rt_log("gfx_shader: SPIR-V in memory %.1f MiB, %d idle %u s this pass; %lld modules dropped (%.1f MiB), %lld read "
+               "back; %lld reads so far, by%s (TOTK_SPIRV_TRIM=0 keeps them)", resident / 1048576.0, n,
+               SPIRV_IDLE_MS / 1000, (long long)T.trimmed, T.trimmed_bytes / 1048576.0, (long long)T.read_back,
+               (long long)T.calls, who);
+    }
+}
+
+static void spirv_trim_main(void *arg) {
+    (void)arg;
+    plat_thread_priority(PLAT_PRIO_LOWEST);
+    for (;;) {
+        plat_sleep_ms(SPIRV_SCAN_MS);
+        spirv_trim_pass();
+    }
+}
+
+static void spirv_trim_start(void) {
+    if (__atomic_load_n(&T.started, __ATOMIC_ACQUIRE)) return;
+    plat_mutex_lock(&T.lock);
+    if (!T.started) {
+        const char *e = cfg_get("TOTK_SPIRV_TRIM");
+        T.off = e && !strcmp(e, "0");
+        if (!T.off && !plat_thread_spawn(spirv_trim_main, NULL, "spirv trim", 0)) T.off = 1;
+        __atomic_store_n(&T.started, 1, __ATOMIC_RELEASE);
+    }
+    plat_mutex_unlock(&T.lock);
+}
+
+const uint32_t *gfx_shader_spirv(const GfxShader *cs, uint64_t *words) {
+    GfxShader *s = (GfxShader *)cs;   // used_ms and a read-back are bookkeeping; the module's bytes do not change
     if (words) *words = s->words;
-    return s->spirv;
+    __atomic_store_n(&s->used_ms, plat_now_ms(), __ATOMIC_RELAXED);
+    plat_inc64(&T.calls);
+    void *from = __builtin_return_address(0);
+    for (int i = 0; i < 8; i++) {   // diagnostic: who keeps modules from going idle
+        void *seen = __atomic_load_n(&T.caller[i], __ATOMIC_RELAXED);
+        if (!seen && __atomic_compare_exchange_n(&T.caller[i], &seen, from, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            seen = from;
+        if (seen == from) {
+            plat_inc64(&T.caller_calls[i]);
+            break;
+        }
+    }
+    uint32_t *w = __atomic_load_n(&s->spirv, __ATOMIC_ACQUIRE);
+    if (w) return w;
+    plat_mutex_lock(&T.lock);
+    w = __atomic_load_n(&s->spirv, __ATOMIC_ACQUIRE);
+    if (!w) {
+        uint64_t size = 0;
+        uint8_t *disk = spirv_read(s->key, s->spirv_from, &size);
+        // The bytes were compared when the module was dropped; a cache file gone or changed since is a broken cache.
+        if (!disk || size != s->words * 4)
+            rt_fatal("gfx_shader: the SPIR-V of a dropped shader module cannot be read back from the shader cache (%s); "
+                     "TOTK_SPIRV_TRIM=0 keeps modules in memory", s->spirv_from == 1 ? "pack" : "loose file");
+        w = (uint32_t *)disk;
+        __atomic_store_n(&s->spirv, w, __ATOMIC_RELEASE);
+        plat_inc64(&T.read_back);
+    }
+    plat_mutex_unlock(&T.lock);
+    return w;
 }
 
 int gfx_shader_stage(const GfxShader *s) { return s->stage; }

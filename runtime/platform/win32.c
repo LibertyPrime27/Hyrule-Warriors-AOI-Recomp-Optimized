@@ -515,6 +515,7 @@ int plat_mem_reserve(uint64_t addr, uint64_t n, int watch) {
 }
 
 void *plat_mem_alloc(size_t n) { return VirtualAlloc(NULL, n, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE); }
+void plat_mem_free(void *p, size_t n) { (void)n; if (p) VirtualFree(p, 0, MEM_RELEASE); }
 
 int plat_mem_commit(uint64_t addr, size_t n) {
     return VirtualAlloc((void *)(uintptr_t)addr, n, MEM_COMMIT, PAGE_READWRITE) != NULL;
@@ -1418,6 +1419,23 @@ void plat_commit_info(double *proc_mb, double *used_mb, double *limit_mb) {
     if (K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pmc, sizeof pmc))
         *proc_mb = (double)(pmc.PrivateUsage >> 20);
 }
+
+void plat_commit_in(const uint64_t *base, const uint64_t *size, int n, uint64_t *in) {
+    MEMORY_BASIC_INFORMATION mbi;
+    for (int i = 0; i < n; i++) {
+        in[i] = 0;
+        uint64_t a = base[i], end = base[i] + size[i];
+        while (a < end && VirtualQuery((void *)(uintptr_t)a, &mbi, sizeof mbi)) {
+            uint64_t lo = (uintptr_t)mbi.BaseAddress, hi = lo + mbi.RegionSize;
+            if (hi <= a) break;
+            uint64_t s = lo > a ? lo : a, e = hi < end ? hi : end;
+            if (mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE && e > s) in[i] += e - s;
+            a = hi;
+        }
+    }
+}
+
+void plat_trim_working_set(void) { SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1); }
 
 void plat_process_memory(uint64_t *resident, uint64_t *private_bytes) {
     PROCESS_MEMORY_COUNTERS_EX pm = {.cb = sizeof pm};

@@ -13,6 +13,9 @@
 // Under VRAM pressure no headroom is kept: the spare block counts against the budget that decides whether a pool gets
 // its VRAM mirror (vk_memory.c), so while use plus two blocks passes 85% of the budget the anchor goes and nothing new
 // is allocated.
+// Only memory types of a device-local heap get headroom. A spare block of a host heap (staging, readback, uniform
+// snapshots) is up to 128 MiB of system RAM held for nothing, and allocating those blocks is not what stalled the
+// render thread: host blocks come and go with the staging pool, which keeps its own spare blocks.
 // TOTK_VRAM_HEADROOM=0 turns it off.
 
 #include "cfg.h"
@@ -76,7 +79,15 @@ static void drop_anchor(const VkCtx *c, uint32_t type) {
     H.anchor[type] = NULL;
 }
 
+static int device_local(const VkCtx *c, uint32_t type) {
+    return (c->mem_props.memoryHeaps[c->mem_props.memoryTypes[type].heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0;
+}
+
 static void top_up(const VkCtx *c, uint32_t type) {
+    if (!device_local(c, type)) {   // system RAM: no spare block (see the header)
+        drop_anchor(c, type);
+        return;
+    }
     VkDeviceSize block = block_size(c, type);
     if (!room(c, type, block)) {
         drop_anchor(c, type);

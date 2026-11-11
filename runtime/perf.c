@@ -270,8 +270,47 @@ static void cpu_placement(void) {
     plat_process_affinity(on ? one : all);
 }
 
+// With the runtime-memory diagnostic: where the process's commit sits. Guest = what the game asked for (heap,
+// physical pages, module images, kernel region), counted from the address space; "other private" is the runtime's and
+// the drivers' own (malloc, Vulkan host memory, stacks). TOTK_MEMORY_TRIM_PROBE=<frame>: at the first diagnostic line
+// from that frame on, the working set is trimmed once; what stays resident right after is locked or pinned memory.
+static void memory_split_line(uint64_t frame) {
+    const RtGuestLayout *g = mem_layout();
+    // The heap is committed exactly as SetHeapSize asked (mem_usage); walking its thousands of write-watch regions took
+    // about 100 ms. The ASLR range spans the others, so module images (fixed window) land in the rest of private.
+    uint64_t base[4] = {0, g->alias.base, g->kernel.base, g->stack.base};
+    uint64_t size[4] = {0, g->alias.size, g->kernel.size, g->stack.size};
+    uint64_t in[4], image, heap, alias, kernel, res, prv;
+    plat_commit_in(base + 1, size + 1, 3, in + 1);
+    mem_usage(&image, &heap, &alias, &kernel);
+    in[0] = heap;
+    plat_process_memory(&res, &prv);
+    uint64_t guest = in[0] + in[1] + in[2] + in[3], other = prv > guest ? prv - guest : 0;
+    const double M = 1048576.0;
+    rt_log("memory-split: frame=%llu private=%.0f working_set=%.0f MiB; heap as sized %.0f (TOTK_LAZY_HEAP=1 commits less); committed: alias %.0f, kernel "
+           "region %.0f, stack %.0f, rest of private (runtime, drivers, module images) %.0f MiB; game asked for: "
+           "heap %.0f, physical %.0f, images %.0f, kernel %.0f MiB",
+           (unsigned long long)frame, prv / M, res / M, in[0] / M, in[1] / M, in[2] / M, in[3] / M, other / M,
+           heap / M, alias / M, image / M, kernel / M);
+    static long long probe = -2;
+    if (probe == -2) {
+        const char *e = cfg_get("TOTK_MEMORY_TRIM_PROBE");
+        probe = e && *e ? atoll(e) : -1;
+    }
+    if (probe >= 0 && frame >= (uint64_t)probe) {
+        probe = -1;
+        uint64_t before = res;
+        uint64_t t0 = plat_now_ns();
+        plat_trim_working_set();
+        plat_process_memory(&res, &prv);
+        rt_log("memory-split: trim probe at frame %llu: working set %.0f -> %.0f MiB right after the trim (%.1f ms)",
+               (unsigned long long)frame, before / M, res / M, (plat_now_ns() - t0) / 1e6);
+    }
+}
+
 static void runtime_memory_line(uint64_t frame) {
     if (frame % 600 || !nvn_memory_diagnostics()) return;
+    memory_split_line(frame);
     NvnMemoryStats s;
     nvn_runtime_memory_stats(&s);
     // Exact owner counters, independent of OS working-set trimming. The program
@@ -299,6 +338,10 @@ static void runtime_memory_line(uint64_t frame) {
            (unsigned long long)s.record_peak_bytes, (unsigned long long)s.record_reinits,
            (unsigned long long)s.program_source_blocks, (unsigned long long)s.program_source_original_bytes,
            (unsigned long long)s.program_source_bytes, (unsigned long long)s.program_source_index_bytes);
+    rt_log("runtime-memory: frame=%llu packed copies %llu: %.1f MiB of pages decommitted, held in %.1f MiB; packed %llu, "
+           "unpacked %llu so far",
+           (unsigned long long)frame, (unsigned long long)s.packed_copies, s.packed_raw_bytes / 1048576.0,
+           s.packed_bytes / 1048576.0, (unsigned long long)s.packs, (unsigned long long)s.unpacks);
 }
 
 void perf_present(uint64_t frame) {

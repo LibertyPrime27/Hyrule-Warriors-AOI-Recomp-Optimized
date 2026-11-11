@@ -857,6 +857,8 @@ void *plat_mem_alloc(size_t n) {
     return p == MAP_FAILED ? NULL : p;
 }
 
+void plat_mem_free(void *p, size_t n) { if (p) munmap(p, n); }
+
 int plat_mem_commit(uint64_t addr, size_t n) {
     if (mprotect((void *)(uintptr_t)addr, n, PROT_READ | PROT_WRITE)) return 0;
     ps_set(addr, n, PS_RW);
@@ -1567,6 +1569,13 @@ void plat_mem_info(float *used_mb, float *total_mb, float *proc_mb) {
     if (f && fscanf(f, "%llu %llu", &size, &resident) == 2) *proc_mb = (float)(resident * (uint64_t)sysconf(_SC_PAGESIZE) >> 20);
     if (f) fclose(f);
 }
+
+void plat_commit_in(const uint64_t *base, const uint64_t *size, int n, uint64_t *in) {
+    (void)base, (void)size;
+    for (int i = 0; i < n; i++) in[i] = 0;
+}
+
+void plat_trim_working_set(void) {}
 
 void plat_process_memory(uint64_t *resident, uint64_t *private_bytes) {
     *resident = *private_bytes = 0;

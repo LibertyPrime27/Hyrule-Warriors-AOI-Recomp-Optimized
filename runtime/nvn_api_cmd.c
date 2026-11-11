@@ -262,6 +262,232 @@ static uint64_t copy_bucket_bytes, zombie_bytes;
 static copy_prefix **zombies;
 static uint32_t nzombies, cap_zombies;
 
+// ---- packing idle copies (Windows). The game keeps every recording's handle until it adds that control memory again,
+// which takes minutes (CTL_PER_RECORDING is what the real driver reports), so copies pile up: 0.4 to 1.4 GiB measured
+// before its 3 MiB control block came round. Almost all of them are submitted once and never read again, but one could
+// be, so none may be freed early. Instead a copy of PACK_MIN bytes or more lives in its own pages, and a low-priority
+// thread compresses one that no submission or CallCommands has read for PACK_IDLE_MS and that no queued submission
+// still reads (used_at <= gfx_replayed_submits), then decommits its pages after the first. The first page keeps the
+// prefix, so the handle (its address) and every prefix field stay valid. Whoever reads a copy (copy_touch, the
+// asynchronous submit, nvn_handle_bytes) makes it whole again first (copy_resident); a read while it is being packed
+// cancels the packing. Lock order: copy_lock, then pack_lock. TOTK_COPY_PACK=0 keeps copies in the heap.
+#define PACK_MIN (16u << 10)
+#define PACK_MAX (4u << 20)       // larger copies stay whole: packing holds copy_lock shared while it compresses
+#define PACK_PAGE 4096u
+#define PACK_IDLE_MS 2000u
+#define PACK_SCAN_MS 250u
+enum { PK_LIVE, PK_PACKING, PK_PACKED, PK_KEEP };   // PK_KEEP: did not compress to 70%, stays whole
+typedef struct { uint64_t serial, made_ms, last_ms; size_t alloc; uint8_t *blob; size_t blob_n; int state; } Pk;
+typedef struct { uint64_t handle, serial; } PkQ;
+static PlatMutex pack_lock = PLAT_MUTEX_INIT;
+static nvn_hmap pk_map = {.klen = 8};   // handle -> Pk of a copy in its own pages
+static PkQ *pk_q;                       // copies in their own pages, oldest first (some already gone)
+static size_t pk_q_head, pk_q_n, pk_q_cap;
+static uint64_t pk_serial, pk_packed, pk_raw, pk_blob, pk_packs, pk_unpacks;
+// Synchronous submits whose replay is running. gfx_replayed_submits counts a synchronous submit replayed as soon as it
+// is made, but its replay reads the copies afterwards on the same thread, and one replay can take seconds while
+// shaders build (a copy packed under a slow boot replay crashed it). Nothing is packed while one runs; a submit that
+// begins after the check makes its copies whole (copy_resident), which cancels a packing in progress.
+static volatile int64_t sync_replays;
+void nvn_sync_replay(int begin) { __atomic_add_fetch(&sync_replays, begin ? 1 : -1, __ATOMIC_SEQ_CST); }
+static int pk_on = -1;
+
+// The codec, the pages and the thread are nvn_copy_codec.c's (zstd, plat_mem_*, plat_thread_spawn). These fallbacks,
+// for builds of this file without it (the tests that compile it alone), keep every copy in the heap and never pack.
+__attribute__((weak)) void *nvn_pack_pages(size_t n) { (void)n; return NULL; }
+__attribute__((weak)) void nvn_pack_pages_free(void *p, size_t n) { (void)p, (void)n; }
+__attribute__((weak)) int nvn_pack_pages_drop(void *p, size_t n) { (void)p, (void)n; return 0; }
+__attribute__((weak)) int nvn_pack_pages_restore(void *p, size_t n) { (void)p, (void)n; return 0; }
+__attribute__((weak)) int nvn_pack_thread(void (*scan)(void), uint32_t period_ms) { (void)scan, (void)period_ms; return 0; }
+__attribute__((weak)) size_t nvn_copy_pack_bound(size_t n) { return n; }
+__attribute__((weak)) size_t nvn_copy_pack(void *dst, size_t cap, const void *src, size_t n) {
+    (void)dst, (void)cap, (void)src, (void)n;
+    return 0;
+}
+__attribute__((weak)) int nvn_copy_unpack(void *dst, size_t n, const void *src, size_t z) {
+    (void)dst, (void)n, (void)src, (void)z;
+    return 0;
+}
+
+static int pack_enabled(void) {
+#ifdef _WIN32
+    if (__atomic_load_n(&pk_on, __ATOMIC_ACQUIRE) < 0) {
+        const char *e = cfg_get("TOTK_COPY_PACK");
+        __atomic_store_n(&pk_on, !e || strcmp(e, "0") != 0, __ATOMIC_RELEASE);
+    }
+    return pk_on;
+#else
+    return 0;
+#endif
+}
+
+static void pk_queue(uint64_t handle, uint64_t serial) {   // pack_lock held
+    if (pk_q_head && pk_q_head * 2 >= pk_q_n) {
+        memmove(pk_q, pk_q + pk_q_head, (pk_q_n - pk_q_head) * sizeof *pk_q);
+        pk_q_n -= pk_q_head, pk_q_head = 0;
+    }
+    if (pk_q_n == pk_q_cap) {
+        pk_q_cap = pk_q_cap ? pk_q_cap * 2 : 1024;
+        pk_q = realloc(pk_q, pk_q_cap * sizeof *pk_q);
+        if (!pk_q) rt_fatal("nvn: out of memory (recording pack queue)");
+    }
+    pk_q[pk_q_n++] = (PkQ){handle, serial};
+}
+
+static void pack_thread_start(void);
+
+// A copy of total bytes (prefix included): its own pages when it can be packed, else the heap.
+static uint8_t *copy_alloc(size_t total, size_t *alloc) {
+    *alloc = 0;
+    if (total >= PACK_MIN && total <= PACK_MAX && pack_enabled()) {
+        size_t n = (total + PACK_PAGE - 1) & ~(size_t)(PACK_PAGE - 1);
+        uint8_t *p = nvn_pack_pages(n);
+        if (p) {
+            *alloc = n;
+            return p;
+        }
+    }
+    return malloc(total);
+}
+
+static void pk_register(uint64_t handle, size_t alloc) {
+    Pk *k = calloc(1, sizeof *k);
+    if (!k) rt_fatal("nvn: out of memory (recording pack record)");
+    uint64_t now = plat_now_ms();
+    k->made_ms = k->last_ms = now, k->alloc = alloc, k->state = PK_LIVE;
+    plat_mutex_lock(&pack_lock);
+    k->serial = ++pk_serial;
+    nvn_hm_put(&pk_map, &handle, k);
+    pk_queue(handle, k->serial);
+    plat_mutex_unlock(&pack_lock);
+    pack_thread_start();
+}
+
+// Frees a copy (or a clone) of either kind once nothing can reach it: under the exclusive copy_lock, or after
+// release_copies took it out of copy_live (copy_garbage_free, possibly on the reclaim thread). Packing runs only on live
+// copies and holds copy_lock shared while it works, so it is done with this one.
+static void copy_free(copy_prefix *pf) {
+    uint64_t handle = (uintptr_t)(pf + 1);
+    plat_mutex_lock(&pack_lock);
+    Pk *k = pk_map.n ? nvn_hm_del(&pk_map, &handle) : NULL;
+    if (k && k->state == PK_PACKED) pk_packed--, pk_raw -= k->alloc - PACK_PAGE, pk_blob -= k->blob_n;
+    plat_mutex_unlock(&pack_lock);
+    if (!k) {
+        free(pf);
+        return;
+    }
+    free(k->blob);
+    nvn_pack_pages_free(pf, k->alloc);
+    free(k);
+}
+
+// The copy at handle is whole and counts as just read. copy_lock held (shared is enough: pack_lock orders this
+// against the packing thread).
+static void copy_resident(uint64_t handle) {
+    if (!__atomic_load_n(&pk_on, __ATOMIC_RELAXED)) return;   // never packs: nothing is in its own pages
+    plat_mutex_lock(&pack_lock);
+    Pk *k = pk_map.n ? nvn_hm_get(&pk_map, &handle) : NULL;
+    if (k) {
+        k->last_ms = plat_now_ms();
+        if (k->state == PK_PACKING) k->state = PK_LIVE;   // the packing thread drops its result
+        else if (k->state == PK_PACKED) {
+            copy_prefix *pf = (copy_prefix *)(uintptr_t)handle - 1;
+            uint8_t *tail = (uint8_t *)pf + PACK_PAGE;
+            size_t n = sizeof *pf + pf->bytes - PACK_PAGE;
+            if (!nvn_pack_pages_restore(tail, k->alloc - PACK_PAGE))
+                rt_fatal("nvn: no memory to unpack a recording copy (%zu bytes)", k->alloc);
+            if (!nvn_copy_unpack(tail, n, k->blob, k->blob_n))
+                rt_fatal("nvn: a packed recording copy does not unpack (%zu bytes)", n);
+            pk_packed--, pk_raw -= k->alloc - PACK_PAGE, pk_blob -= k->blob_n, pk_unpacks++;
+            free(k->blob);
+            k->blob = NULL, k->blob_n = 0, k->state = PK_LIVE;
+            pk_queue(handle, k->serial);   // it can be packed again once it is idle again
+        }
+    }
+    plat_mutex_unlock(&pack_lock);
+}
+
+// Packs the copy at handle if it is still the queued one, live, idle and not read by a queued submission.
+// Returns 1 when it should go back in the queue (read recently).
+static int pack_one(uint64_t handle, uint64_t serial) {
+    int again = 0;
+    plat_mutex_lock_shared(&copy_lock);   // the copy cannot be freed while this runs
+    copy_prefix *pf = nvn_hm_get(&copy_live, &handle);
+    uint64_t replayed = gfx_replayed_submits(), now = plat_now_ms();
+    plat_mutex_lock(&pack_lock);
+    Pk *k = pk_map.n ? nvn_hm_get(&pk_map, &handle) : NULL;
+    int go = pf && k && k->serial == serial && k->state == PK_LIVE;
+    if (go && (now - k->last_ms < PACK_IDLE_MS || __atomic_load_n(&pf->used_at, __ATOMIC_RELAXED) > replayed ||
+               __atomic_load_n(&sync_replays, __ATOMIC_SEQ_CST) > 0))
+        go = 0, again = 1;
+    uint64_t used = go ? __atomic_load_n(&pf->used_at, __ATOMIC_RELAXED) : 0;
+    if (go) k->state = PK_PACKING;
+    plat_mutex_unlock(&pack_lock);
+    if (go) {
+        uint8_t *tail = (uint8_t *)pf + PACK_PAGE;
+        size_t n = sizeof *pf + pf->bytes - PACK_PAGE, bound = nvn_copy_pack_bound(n);
+        uint8_t *blob = malloc(bound);
+        size_t z = blob ? nvn_copy_pack(blob, bound, tail, n) : 0;
+        int small = z && z <= n / 10 * 7;
+        plat_mutex_lock(&pack_lock);
+        if (k->state == PK_PACKING && __atomic_load_n(&pf->used_at, __ATOMIC_RELAXED) == used && small &&
+            nvn_pack_pages_drop(tail, k->alloc - PACK_PAGE)) {
+            uint8_t *fit = realloc(blob, z);
+            k->blob = fit ? fit : blob, k->blob_n = z, k->state = PK_PACKED;
+            pk_packed++, pk_raw += k->alloc - PACK_PAGE, pk_blob += z, pk_packs++;
+            blob = NULL;
+        } else if (k->state == PK_PACKING) {
+            k->state = small ? PK_LIVE : PK_KEEP;
+            again = small;
+        }
+        plat_mutex_unlock(&pack_lock);
+        free(blob);
+    }
+    plat_mutex_unlock_shared(&copy_lock);
+    return again;
+}
+
+static void pack_scan(void) {   // one pass of the packing thread, every PACK_SCAN_MS
+    {
+        uint64_t now = plat_now_ms();
+        for (size_t budget = 1 << 16; budget; budget--) {
+            plat_mutex_lock(&pack_lock);
+            if (pk_q_head == pk_q_n) {
+                plat_mutex_unlock(&pack_lock);
+                break;
+            }
+            PkQ e = pk_q[pk_q_head];
+            Pk *k = pk_map.n ? nvn_hm_get(&pk_map, &e.handle) : NULL;
+            if (k && k->serial == e.serial && k->state == PK_LIVE && now - k->made_ms < PACK_IDLE_MS) {
+                plat_mutex_unlock(&pack_lock);   // oldest first: the rest are younger still
+                break;
+            }
+            pk_q_head++;
+            int stale = !k || k->serial != e.serial || k->state != PK_LIVE;
+            plat_mutex_unlock(&pack_lock);
+            if (!stale && pack_one(e.handle, e.serial)) {
+                plat_mutex_lock(&pack_lock);
+                pk_queue(e.handle, e.serial);
+                plat_mutex_unlock(&pack_lock);
+            }
+        }
+    }
+}
+
+static void pack_thread_start(void) {
+#ifdef _WIN32
+    static volatile int32_t started;
+    if (__atomic_load_n(&started, __ATOMIC_ACQUIRE) || __atomic_exchange_n(&started, 1, __ATOMIC_ACQ_REL)) return;
+    if (!nvn_pack_thread(pack_scan, PACK_SCAN_MS)) {
+        __atomic_store_n(&pk_on, 0, __ATOMIC_RELEASE);
+        rt_log("nvn: no thread to pack idle recording copies; they stay whole");
+    } else {
+        rt_log("nvn: recording copies of %u KiB or more are packed after %u s unread (TOTK_COPY_PACK=0 keeps them whole)",
+               PACK_MIN >> 10, PACK_IDLE_MS / 1000);
+    }
+#endif
+}
+
 static void zombie_add(copy_prefix *pf) {   // copy_lock held
     if (nzombies == cap_zombies) {
         cap_zombies = cap_zombies ? cap_zombies * 2 : 64;
@@ -276,7 +502,7 @@ static void zombie_sweep(uint64_t replayed) {   // copy_lock held
     for (uint32_t i = 0; i < nzombies;) {
         if (zombies[i]->used_at <= replayed) {
             zombie_bytes -= sizeof *zombies[i] + zombies[i]->bytes;
-            free(zombies[i]);
+            copy_free(zombies[i]);
             zombies[i] = zombies[--nzombies];
         } else {
             i++;
@@ -298,6 +524,7 @@ int nvn_handle_live(uint64_t handle) {
 static uint64_t copy_info(uint64_t handle, uint32_t *sync_ops) {
     plat_mutex_lock_shared(&copy_lock);
     const copy_prefix *pf = copy_find(handle);
+    if (pf) copy_resident(handle);
     uint64_t n = pf ? pf->bytes : 0;
     if (sync_ops) *sync_ops = pf ? pf->sync_ops : 0;
     plat_mutex_unlock_shared(&copy_lock);
@@ -310,7 +537,7 @@ static uint64_t copy_touch(uint64_t handle, uint64_t now, const char *what) {
     plat_mutex_lock_shared(&copy_lock);
     copy_prefix *pf = copy_find(handle);
     uint64_t bytes = 0;
-    if (pf) __atomic_store_n(&pf->used_at, now, __ATOMIC_RELAXED), bytes = pf->bytes;
+    if (pf) copy_resident(handle), __atomic_store_n(&pf->used_at, now, __ATOMIC_RELAXED), bytes = pf->bytes;
     plat_mutex_unlock_shared(&copy_lock);
     if (!pf) rt_fatal("nvn: %s: command handle %#llx is not a live recording (released or never recorded)", what,
                       (unsigned long long)handle);
@@ -321,7 +548,8 @@ static uint64_t copy_touch(uint64_t handle, uint64_t now, const char *what) {
 // into one host block of its exact size. One allocation and one copy: growing the copy record by record cost the
 // game's main thread about 1 ms a frame in reallocations and small copies (1.4.3, field).
 static uint8_t *flatten_recording(const uint8_t *p, size_t n) {
-    uint8_t *out = malloc(sizeof(copy_prefix) + n);
+    size_t alloc;
+    uint8_t *out = copy_alloc(sizeof(copy_prefix) + n, &alloc);
     if (!out) rt_fatal("nvn: command copy allocation");
     memcpy(out + sizeof(copy_prefix), p, n);
     uint32_t deferred = 1, sync_ops = COPY_SYNC_KNOWN;
@@ -353,6 +581,7 @@ static uint8_t *flatten_recording(const uint8_t *p, size_t n) {
     // data in deferred payloads changes. Reuse these facts instead of walking
     // an immediate recording three more times at every submission.
     *(copy_prefix *)out = (copy_prefix){.magic = COPY_MAGIC, .bytes = n, .deferred = deferred, .sync_ops = sync_ops};
+    if (alloc) pk_register((uintptr_t)(out + sizeof(copy_prefix)), alloc);
     return out + sizeof(copy_prefix);
 }
 
@@ -392,7 +621,7 @@ static void copy_garbage_free(void *head) {
     while (entry) {
         copy_prefix *next;
         memcpy(&next, (const uint8_t *)(entry + 1), sizeof next);
-        free(entry);
+        copy_free(entry);   // a copy in its own pages goes back to the OS, packed or not
         entry = next;
     }
 }
@@ -1395,6 +1624,7 @@ void nvn_submit_prepare_async(const uint64_t *handles, uint64_t *out, int n) {
                      (unsigned long long)handle);
         }
         nvn_mode_trace(NVN_MODE_HANDLE, 0, handle, (uint32_t)i, now);
+        copy_resident(handle);
         out[i] = handle;
         if (pf->used_at > replayed && pf->used_at != now && pf->deferred != 1) {
             size_t sz = sizeof *pf + pf->bytes;
@@ -1458,6 +1688,10 @@ void nvn_runtime_memory_stats(NvnMemoryStats *out) {
                             (uint64_t)cap_zombies * sizeof *zombies;
     out->zombies = nzombies;
     out->zombie_bytes = zombie_bytes;
+    plat_mutex_lock(&pack_lock);
+    out->packed_copies = pk_packed, out->packed_raw_bytes = pk_raw, out->packed_bytes = pk_blob;
+    out->packs = pk_packs, out->unpacks = pk_unpacks;
+    plat_mutex_unlock(&pack_lock);
     plat_mutex_unlock_shared(&copy_lock);
     plat_mutex_lock_shared(&pin_lock);
     out->texture_pins = pins.n;

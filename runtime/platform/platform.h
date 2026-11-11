@@ -185,6 +185,7 @@ int plat_mem_reserve(uint64_t addr, uint64_t n, int watch);
 // n bytes of read-write memory anywhere, zero, backed only as pages are first written (plat_mem_protect may seal them);
 // NULL on failure. Kept until exit.
 void *plat_mem_alloc(size_t n);
+void plat_mem_free(void *p, size_t n);                     // a plat_mem_alloc block of n bytes
 int plat_mem_commit(uint64_t addr, size_t n);             // read-write pages inside a reserved range; 1 on success
 int plat_mem_decommit(uint64_t addr, uint64_t n);          // contents dropped: committed again, the pages read zero
 int plat_mem_protect(uint64_t addr, uint64_t n, int prot); // committed pages only; 1 on success
@@ -393,6 +394,12 @@ void plat_commit_info(double *proc_mb, double *used_mb, double *limit_mb);
 // This process's memory in bytes: resident (the working set) and private (Windows: committed private bytes; Linux: the
 // resident anonymous pages). 0 when unknown.
 void plat_process_memory(uint64_t *resident, uint64_t *private_bytes);
+// Committed private bytes of this process inside each [base[i], base[i]+size[i]) (diagnostics; walks only those
+// ranges, so it stays cheap however many regions the drivers map elsewhere). Zeros where unsupported.
+void plat_commit_in(const uint64_t *base, const uint64_t *size, int n, uint64_t *in);
+// Asks the OS to page out everything it can of this process's working set (diagnostics: what stays resident is
+// locked or pinned memory, plus what the next frames touch again). No effect where unsupported.
+void plat_trim_working_set(void);
 
 // ---- child processes: a program with stdin and stdout piped to us (stderr discarded), no console window.
 typedef struct PlatChild PlatChild;

@@ -768,6 +768,15 @@ void *mem_kernel_alloc(uint64_t size, uint64_t align) {
     return p;
 }
 
+void mem_usage(uint64_t *image, uint64_t *heap, uint64_t *alias, uint64_t *kernel) {
+    plat_mutex_lock_shared(&lock);
+    *image = image_bytes(), *heap = heap_size, *alias = alias_bytes;
+    plat_mutex_unlock_shared(&lock);
+    plat_mutex_lock(&klock);
+    *kernel = kcommitted ? kcommitted - RT_KERNEL_BASE : 0;
+    plat_mutex_unlock(&klock);
+}
+
 void mem_kernel_free(void *p, uint64_t size) {
     if (!p) return;
     uint64_t a = (uintptr_t)p;

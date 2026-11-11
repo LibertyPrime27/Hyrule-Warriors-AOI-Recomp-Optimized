@@ -152,6 +152,9 @@ uint32_t mem_query(uint64_t a, RtMemoryInfo *out);                              
 uint32_t mem_map_physical(uint64_t a, uint64_t n);                              // 0x2C
 uint32_t mem_unmap_physical(uint64_t a, uint64_t n);                            // 0x2D
 int mem_info(uint32_t id, uint64_t *out);                  // GetInfo memory ids 2-7, 12-17, 21, 22, 28; 0 if not a memory id
+void mem_usage(uint64_t *image, uint64_t *heap, uint64_t *alias, uint64_t *kernel);
+                                                           // what the game holds: module images, SetHeapSize heap,
+                                                           // MapPhysicalMemory pages, committed kernel region (bytes)
 void *mem_kernel_alloc(uint64_t size, uint64_t align);     // zeroed, guest-visible, in the kernel region; align <= 64 KiB
 uint64_t mem_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max);
                                                            // GetWriteWatch(RESET): fills pages[] (4 KiB addresses)

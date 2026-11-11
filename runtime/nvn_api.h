@@ -65,7 +65,10 @@ typedef struct NvnFenceBatch NvnFenceBatch;
 NvnFenceBatch *nvn_submit_capture_fences(const uint64_t *handles, int n);
 void nvn_submit_publish_fences(NvnFenceBatch *batch, uint64_t fence);
 int gfx_replay_async(void);                                // 1: the back end replays submissions on its own thread
-uint64_t gfx_replayed_submits(void);                       // newest submit number (nvn_submit_count) replayed
+uint64_t gfx_replayed_submits(void);
+void nvn_sync_replay(int begin);                            // a synchronous submit's replay begins (1) or ends (0):
+                                                           // gfx_replayed_submits counts it done at submit time, and
+                                                           // one replay can take seconds while shaders build                       // newest submit number (nvn_submit_count) replayed
 #define NVN_HANDLE_TEX(h) ((int)((h) & 0xfffff))           // combined texture handle = texture id | sampler id << 20
 #define NVN_HANDLE_SAMP(h) ((int)(((h) >> 20) & 0xfff))
 extern GfxStats gfx_counters;                              // behind gfx_stats(); add with __atomic_fetch_add. frames:
@@ -135,7 +138,19 @@ typedef struct {
     uint64_t program_control_index_bytes;
     uint64_t program_ledger_disabled, program_unmatched_frees, program_duplicate_allocations;
     uint64_t program_source_blocks, program_source_original_bytes, program_source_bytes, program_source_index_bytes;
+    // Packed idle copies (nvn_api_cmd.c): packed_raw_bytes of their pages are decommitted and held as packed_bytes.
+    uint64_t packed_copies, packed_raw_bytes, packed_bytes, packs, unpacks;
 } NvnMemoryStats;
+// Idle recording-copy packing (nvn_copy_codec.c; nvn_api_cmd.c has fallbacks that never pack): pages of their own for
+// a copy, decommitting and recommitting all of them after the first, the low-priority thread, and the zstd codec.
+void *nvn_pack_pages(size_t n);                                                 // NULL: the copy stays in the heap
+void nvn_pack_pages_free(void *p, size_t n);
+int nvn_pack_pages_drop(void *p, size_t n);                                     // 1 on success
+int nvn_pack_pages_restore(void *p, size_t n);                                  // committed again, zero
+int nvn_pack_thread(void (*scan)(void), uint32_t period_ms);                    // 1 when the thread runs
+size_t nvn_copy_pack_bound(size_t n);
+size_t nvn_copy_pack(void *dst, size_t cap, const void *src, size_t n);       // compressed size; 0: not packed
+int nvn_copy_unpack(void *dst, size_t n, const void *src, size_t z);          // 1 when exactly n bytes came back
 int nvn_memory_diagnostics(void);                         // RUNTIME_MEMORY_DIAG=1; read once, off by default
 void nvn_runtime_memory_stats(NvnMemoryStats *out);       // no allocation, no collection/reclamation side effects
 void nvn_program_memory_stats(NvnMemoryStats *out);       // nvn_api_obj.c fills only the program fields
