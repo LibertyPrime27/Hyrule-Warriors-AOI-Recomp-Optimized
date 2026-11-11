@@ -102,7 +102,7 @@ int main(void){
             path = Path(tmp) / "rate.c"; path.write_text(source)
             for opt in ("-O0", "-O2"):
                 exe = path.with_suffix(".exe")
-                built = subprocess.run(["F:/llvm-mingw/bin/clang.exe", opt, "-march=x86-64-v3", "-I", str(ROOT / "runtime"),
+                built = subprocess.run([os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe", opt, "-march=x86-64-v3", "-I", str(ROOT / "runtime"),
                                         str(path), "-o", str(exe)], capture_output=True, text=True)
                 self.assertEqual(built.returncode, 0, built.stderr)
                 run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
@@ -175,7 +175,7 @@ int main(void){
             path = Path(tmp) / "step.c"; path.write_text(source)
             for opt in ("-O0", "-O2"):
                 exe = path.with_suffix(".exe")
-                built = subprocess.run(["F:/llvm-mingw/bin/clang.exe", opt, "-march=x86-64-v3", "-I", str(ROOT / "runtime"),
+                built = subprocess.run([os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe", opt, "-march=x86-64-v3", "-I", str(ROOT / "runtime"),
                                         str(path), "-o", str(exe)], capture_output=True, text=True)
                 self.assertEqual(built.returncode, 0, built.stderr)
                 result = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)

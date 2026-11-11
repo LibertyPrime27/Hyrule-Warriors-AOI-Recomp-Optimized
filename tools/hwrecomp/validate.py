@@ -5,6 +5,7 @@ Windows DLL. No game startup, assets, OS hooks or network functionality. Input
 module hashes must match the profile before code is compiled or executed.
 """
 from __future__ import annotations
+import os
 import argparse
 import ctypes as ct
 import hashlib
@@ -126,7 +127,7 @@ def main():
     parser.add_argument("--profile", type=Path,
                         default=Path(__file__).resolve().parents[2] / "config/games/hwaoi-update-196608.json")
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--clang", type=Path, default=Path("F:/llvm-mingw/bin/clang.exe"))
+    parser.add_argument("--clang", type=Path, default=Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe"))
     parser.add_argument("--unicorn-dir")
     parser.add_argument("--cases", type=int, default=64)
     parser.add_argument("--report", required=True)

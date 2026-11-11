@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from hwaoi_probe import capture
 
 
-@unittest.skipUnless(os.name == "nt" and Path("F:/llvm-mingw/bin/clang.exe").is_file(), "Windows Clang required")
+@unittest.skipUnless(os.name == "nt" and Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe").is_file(), "Windows Clang required")
 class ProbeRunnerTests(unittest.TestCase):
     def test_exit_and_timeout_are_distinct(self):
         for folder in (ROOT / "work/build", ROOT / "work/reports"):
@@ -46,7 +46,7 @@ int main(int n, char **v) {
 }
 ''', encoding="utf-8")
                 executable = Path(build) / "fixture.exe"
-                subprocess.run(["F:/llvm-mingw/bin/clang.exe", str(source), "-o", str(executable)], check=True)
+                subprocess.run([os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe", str(source), "-o", str(executable)], check=True)
                 normal = capture(executable, "--selftest", Path(reports) / "normal", 5)
                 self.assertEqual(normal["exit_code"], 0)
                 self.assertFalse(normal["timed_out"])

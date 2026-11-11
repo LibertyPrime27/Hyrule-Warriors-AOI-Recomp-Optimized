@@ -1,4 +1,5 @@
 """DLC (add-on content) installation from NUPs and folders, plus the native aoc.c mount/read path."""
+import os
 import hashlib
 from pathlib import Path
 import shutil
@@ -126,7 +127,7 @@ class AocTests(unittest.TestCase):
                 hwaoi_aoc.install_from_dir(src, folder / "aoc", 4, TITLE_ID)
 
     def test_native_aoc_mount_list_read_and_integrity(self):
-        compiler = Path("F:/llvm-mingw/bin/clang.exe")
+        compiler = Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe")
         if not compiler.is_file():
             self.skipTest("test Clang not installed")
         with tempfile.TemporaryDirectory() as temp:

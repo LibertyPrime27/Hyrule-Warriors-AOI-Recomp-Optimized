@@ -1,4 +1,5 @@
 """Synthetic NUP/cache/index tests, with a native storage-routing check."""
+import os
 import hashlib
 import json
 from dataclasses import replace
@@ -199,7 +200,7 @@ class RomfsTests(unittest.TestCase):
             romfs_index.build_index({"romfs_size": 10, "files": [{"path": "a/../b", "offset": 0, "size": 1}]})
 
     def test_native_storage_boundary_and_overflow(self):
-        compiler = Path("F:/llvm-mingw/bin/clang.exe")
+        compiler = Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe")
         if not compiler.is_file():
             self.skipTest("test Clang not installed")
         source = '''#include "romfs_storage.h"

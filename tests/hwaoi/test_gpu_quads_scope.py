@@ -10,7 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests"))
 from nvn2_compute_c0_test import function
-CC = Path("F:/llvm-mingw/bin/clang.exe")
+CC = Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe")
 # Vulkan/VMA headers: HWAOI_TEST_DEPS (a deps tree with include/), e.g. a compiled game's work/toolchain/deps.
 DEPS = Path(os.environ.get("HWAOI_TEST_DEPS") or "F:/TotKDependencies/runtime/deps") / "include"
 

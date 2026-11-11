@@ -14,7 +14,7 @@ import hwaoi_icon  # noqa: E402
 from test_formats import make_nup, refresh_toc_hash  # noqa: E402
 
 PNG = b"\x89PNG\r\n\x1a\n"
-CLANG = Path(os.environ.get("HWAOI_TEST_CLANG", "F:/llvm-mingw/bin/clang.exe"))
+CLANG = Path(os.environ.get("HWAOI_TEST_CLANG", os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe"))
 NINJA = Path(os.environ.get("HWAOI_TEST_NINJA", "F:/HWAoI-Compiler/dev/bin/ninja.exe"))
 
 

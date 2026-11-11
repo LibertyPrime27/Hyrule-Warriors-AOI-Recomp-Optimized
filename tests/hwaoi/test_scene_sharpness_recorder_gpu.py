@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-CC = Path("F:/llvm-mingw/bin/clang.exe")
+CC = Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe")
 DEPS = Path("F:/TotKDependencies/runtime/deps")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_scene_sharpness_gpu as direct

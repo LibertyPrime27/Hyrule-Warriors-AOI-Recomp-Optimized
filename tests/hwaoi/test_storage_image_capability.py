@@ -14,7 +14,7 @@ from xlate_smoke import EXIT, SCHED, fragment_code, mov32i
 
 EXE = Path(os.environ.get("HWAOI_TEST_XLATE", str(ROOT / "work/build/hwaoi196608/xlate-managed-irbanks/totk_xlate.exe")))
 VAL = Path("F:/GCC/ucrt64/bin/spirv-val.exe")
-CC = Path("F:/llvm-mingw/bin/clang.exe")
+CC = Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe")
 DEPS = Path("F:/TotKDependencies/runtime/deps/include")
 
 

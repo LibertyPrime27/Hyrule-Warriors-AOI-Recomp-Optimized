@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-CC = Path("F:/llvm-mingw/bin/clang.exe")
+CC = Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe")
 DEPS = Path(os.environ.get("HWAOI_TEST_DEPS") or "F:/TotKDependencies/runtime/deps")   # Vulkan/VMA headers, libvulkan-1
 
 

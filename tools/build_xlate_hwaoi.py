@@ -189,10 +189,9 @@ def smoke_ir_banks(executable, folder, env, spirv_val):
 def build(args):
     require(os.name == "nt", "this build entry currently targets Windows x64")
     dotnet = args.dotnet.resolve(strict=True)
-    require(dotnet.drive.lower() == "f:", "use the F-drive .NET installation")
     output = target_path(args.out, ROOT / "work/build/hwaoi196608")
     require(output.name.startswith("xlate"), "translator deployment folder must start with xlate")
-    cache = Path("F:/NuGet")
+    cache = dotnet.parent.parent / "NuGet"   # beside the .NET folder (HWAOI_TOOLS, default F:/)
     for folder in (cache / "packages", cache / "http", cache / "plugins", cache / "cli-home", cache / "empty-feed"):
         folder.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
@@ -248,7 +247,7 @@ def build(args):
     publish = workspace / "publish"
     properties = ["-p:PublishAot=false", "-p:SelfContained=true", "-p:UseAppHost=true",
                   "-p:InvariantGlobalization=true", "-p:GeneratePackageOnBuild=false",
-                  "-p:NuGetAudit=false", f"-p:RyuSrc={source}", "-p:RestoreFallbackFolders=F:/DotNet/nuget"]
+                  "-p:NuGetAudit=false", f"-p:RyuSrc={source}", f"-p:RestoreFallbackFolders={(dotnet.parent / 'nuget').as_posix()}"]
     # Offline first: use already cached, version-matched NuGet packages. --online
     # explicitly permits nuget.org if a dependency/runtime pack is absent.
     restore_sources = "https://api.nuget.org/v3/index.json" if args.online else str(cache / "empty-feed")
@@ -279,7 +278,7 @@ def build(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--dotnet", type=Path, default=Path("F:/DotNet/dotnet.exe"))
+    parser.add_argument("--dotnet", type=Path, default=Path(os.environ.get("HWAOI_TOOLS", "F:") + "/DotNet/dotnet.exe"))
     parser.add_argument("--out", type=Path, default=ROOT / "work/build/hwaoi196608/xlate-managed")
     parser.add_argument("--online", action="store_true", help="allow missing package restore from nuget.org")
     parser.add_argument("--defined-float-minmax", action="store_true")

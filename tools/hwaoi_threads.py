@@ -19,8 +19,8 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-COMPILER = Path("F:/llvm-mingw/bin/clang.exe")
-SYMBOLIZER = Path("F:/llvm-mingw/bin/llvm-addr2line.exe")
+COMPILER = Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe")
+SYMBOLIZER = Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/llvm-addr2line.exe")
 
 
 def digest(path):

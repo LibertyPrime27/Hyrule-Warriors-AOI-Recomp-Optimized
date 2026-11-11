@@ -1,4 +1,5 @@
 """Independent decoding of native-size patches and strict preset/refusal checks."""
+import os
 import json
 from pathlib import Path
 import struct
@@ -73,7 +74,7 @@ class DisplaySettingsTests(unittest.TestCase):
             self.assertEqual(instructions(off)[0].mnemonic, "nop")
 
     def test_native_presets_and_invalid_forms(self):
-        cc = Path("F:/llvm-mingw/bin/clang.exe")
+        cc = Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe")
         if not cc.is_file():
             self.skipTest("existing native compiler unavailable")
         source = r'''
@@ -149,7 +150,7 @@ int main(int argc,char **argv){
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "capacity.c"; path.write_text(source)
             exe = path.with_suffix(".exe")
-            subprocess.run(["F:/llvm-mingw/bin/clang.exe", "-O2", "-I", str(ROOT / "runtime"),
+            subprocess.run([os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe", "-O2", "-I", str(ROOT / "runtime"),
                             str(path), "-o", str(exe)], check=True, capture_output=True)
             subprocess.run([str(exe), "good"], check=True)
             self.assertEqual(subprocess.run([str(exe), "bad"], capture_output=True).returncode, 73)

@@ -1,11 +1,12 @@
 """Run the actual NVN queue/command wait code against a latched native backend."""
+import os
 from pathlib import Path
 import subprocess
 import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-CLANG = Path("F:/llvm-mingw/bin/clang.exe")
+CLANG = Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe")
 
 
 @unittest.skipUnless(CLANG.is_file(), "project Clang is not installed")

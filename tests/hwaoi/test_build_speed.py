@@ -40,14 +40,14 @@ class BuildSpeedTests(unittest.TestCase):
             layout.write([("main", 0x200000, 4096)], out)
             self.assertIn("0x200000", (out / "layout.h").read_text())
 
-    @unittest.skipUnless(os.name == "nt" and Path("F:/llvm-mingw/bin/clang.exe").is_file(), "Windows Clang/Ninja")
+    @unittest.skipUnless(os.name == "nt" and Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe").is_file(), "Windows Clang/Ninja")
     def test_ninja_noop_parallelism_and_compiler_stamp(self):
         with tempfile.TemporaryDirectory(prefix="hwaoi-build speed-") as tmp:
             root = Path(tmp); out = root / "out"; out.mkdir()
             a = root / "a.c"; b = root / "b.c"; stamp = root / "compiler identity.json"
             a.write_text("int a(void){return 1;}"); b.write_text("int b(void){return 2;}"); stamp.write_text("one")
             (out / "modules.c").write_text("int a(void);int b(void);int main(void){return a()+b()!=3;}")
-            values = {"CLANG": Path("F:/llvm-mingw/bin/clang.exe"), "DEPS": Path("F:/TotKDependencies/runtime/deps")}
+            values = {"CLANG": Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe"), "DEPS": Path("F:/TotKDependencies/runtime/deps")}
             with patch.multiple(build_game, **values), patch.object(build_game, "runtime_sources", side_effect=lambda *args: []):
                 def generate(jobs):
                     text, objs, exe = build_game.ninja_file(root, out, {"main": [a, b]}, jobs, toolchain_stamp=stamp)

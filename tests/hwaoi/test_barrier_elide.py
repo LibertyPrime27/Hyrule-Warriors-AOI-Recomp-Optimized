@@ -1,4 +1,5 @@
 """Which guest nvnCommandBufferBarrier masks still record a Vulkan barrier (runtime/vk_exec.c)."""
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -8,7 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests"))
 from nvn2_compute_c0_test import function
-CC = Path("F:/llvm-mingw/bin/clang.exe")
+CC = Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe")
 
 
 def source():

@@ -2,7 +2,7 @@
 import os,re,subprocess,sys,tempfile,unittest
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
-CC=Path('F:/llvm-mingw/bin/clang.exe')
+CC=Path(os.environ.get("HWAOI_TOOLS", "F:") + '/llvm-mingw/bin/clang.exe')
 DEPS=Path(os.environ.get('HWAOI_TEST_DEPS') or 'F:/TotKDependencies/runtime/deps')/'include'   # HWAOI_TEST_DEPS: a deps tree with include/
 sys.path.insert(0,str(ROOT/'tests'))
 from nvn2_compute_c0_test import function

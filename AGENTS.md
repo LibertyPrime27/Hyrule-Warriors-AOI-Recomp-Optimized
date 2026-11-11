@@ -8,8 +8,10 @@ historical reference, not the instructions for this fork.
 ## User environment requirement
 
 Any downloaded compiler, SDK or other tool added to the system environment must
-be installed under F:\ in a folder named for that tool, such as F:\Git.
-Reuse existing tools before installing anything. Do not install in C:\msys64.
+be installed in the tools folder named by `HWAOI_TOOLS` (default `F:\`), in a
+folder named for that tool, such as `<tools>\DotNet`. Scripts and tests read
+llvm-mingw, DotNet, NuGet and shaderc from there. Reuse existing tools before
+installing anything. Do not install in C:\msys64.
 
 ## Content and execution boundaries
 

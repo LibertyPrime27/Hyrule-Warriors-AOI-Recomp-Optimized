@@ -13,8 +13,8 @@ from hwrecomp.a64 import UnsupportedInstruction, instruction_support, translate
 
 ROOT = Path(__file__).resolve().parents[2]
 CLANG = os.environ.get("HWR_TEST_CLANG") or shutil.which("clang")
-if not CLANG and Path("F:/llvm-mingw/bin/clang.exe").is_file():
-    CLANG = "F:/llvm-mingw/bin/clang.exe"
+if not CLANG and Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe").is_file():
+    CLANG = os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe"
 
 
 def words(*values):

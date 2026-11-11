@@ -61,7 +61,7 @@ int main(void){
             path = Path(tmp) / "factory.c"; path.write_text(source)
             for opt in ("-O0", "-O2"):
                 exe = path.with_suffix(".exe")
-                subprocess.run(["F:/llvm-mingw/bin/clang.exe", opt, "-Wall", "-Wextra", "-Werror",
+                subprocess.run([os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe", opt, "-Wall", "-Wextra", "-Werror",
                                 str(path), "-o", str(exe)], check=True, capture_output=True)
                 subprocess.run([str(exe)], check=True, capture_output=True)
 

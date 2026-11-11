@@ -10,7 +10,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-CLANG = Path("F:/llvm-mingw/bin/clang.exe")
+CLANG = Path(os.environ.get("HWAOI_TOOLS", "F:") + "/llvm-mingw/bin/clang.exe")
 SDL_INCLUDE = Path("F:/TotKDependencies/runtime/deps/include")
 
 

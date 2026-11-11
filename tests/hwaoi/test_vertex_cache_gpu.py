@@ -5,7 +5,7 @@ import subprocess,sys,tempfile,unittest
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'tests/hwaoi'))
 import test_gpu_quads as harness
-CC=Path('F:/llvm-mingw/bin/clang.exe');DEPS=Path(os.environ.get('HWAOI_TEST_DEPS') or 'F:/TotKDependencies/runtime/deps')   # HWAOI_TEST_DEPS: a deps tree with include/ and lib/
+CC=Path(os.environ.get("HWAOI_TOOLS", "F:") + '/llvm-mingw/bin/clang.exe');DEPS=Path(os.environ.get('HWAOI_TEST_DEPS') or 'F:/TotKDependencies/runtime/deps')   # HWAOI_TEST_DEPS: a deps tree with include/ and lib/
 
 def source():
     base=harness.source(False)
