@@ -33,7 +33,7 @@ The log names the layout in effect (`input: gamepad layout ...`); the menu shows
 | Plus | Start | Tab | menu, inventory |
 | Minus | Back | M | map |
 
-Esc is unbound in the game; it opens the settings menu and releases the mouse cursor (see Mouse camera). Z and X duplicate ZL and ZR so menu pages turn with two neighbouring keys; the menu tabs (L, R) are Q and R. The mouse wheel is unbound. The bindings are the tables of `input_map` in `runtime/input_map.c`: the keys (platform-neutral key ids) and one gamepad table per layout (gamepad inputs by position); `runtime/input_win.c` translates Win32 virtual keys and SDL buttons.
+Esc is the *Open menu* key: it opens the settings menu and releases the mouse cursor (see Mouse camera). Controllers have no Open menu button by default; one can be bound in the *Controls* tab. Z and X duplicate ZL and ZR so menu pages turn with two neighbouring keys; the menu tabs (L, R) are Q and R. The mouse wheel is unbound. The bindings are the tables of `input_map` in `runtime/input_map.c`: the keys (platform-neutral key ids) and one gamepad table per layout (gamepad inputs by position); `runtime/input_win.c` translates Win32 virtual keys and SDL buttons.
 
 ## Xbox button prompts
 
@@ -52,15 +52,15 @@ Without the folder (an install made by an older setup, or one where the setup co
 
 | Key | Gamepad | Action |
 |---|---|---|
-| F1 or Esc | Minus and Plus together | open or close the settings menu; the game gets no input while it is open |
+| F1 or Esc (Open menu) | Minus and Plus together, or a button bound to Open menu | open or close the settings menu; the game gets no input while it is open |
 | F10 | L3 + R3 (both stick clicks) | performance overlay: off, frame rate, full panel |
 | F11 | | borderless fullscreen on or off, saved to `totk.ini` |
 
-The Minus+Plus combo never reaches the game. In the menu the arrow keys, the D-pad or the left stick move, Enter or A selects, Q and E or L and R switch tabs, Esc or B goes back (Switch button names, as in the table above).
+The Minus+Plus combo never reaches the game. A controller button bound to *Open menu* opens or closes the menu when tapped; held for half a second it presses Minus (the map) instead, so it can share Back with the map. In the menu the arrow keys, the D-pad or the left stick move, Enter or A selects, Q and E or L and R switch tabs, Esc or B goes back (Switch button names, as in the table above).
 
 ## Remapping
 
-The *Controls* tab of the settings menu lists, under the button layout, every Switch button and the eight stick directions the keys drive (movement and camera), each with two key cells and a controller cell. Select a cell, press A or Enter, then press the new key, mouse button or controller button; Esc or five seconds without a press cancel, and a controller button cancels a key cell. Delete, Backspace or X clears the selected cell. A key another action has moves to the new one (the description names the action it left); a controller button swaps with the one it replaces. A remapped controller button is physical: from then on the face buttons (A B X Y) stay where they are in both layouts, until the buttons are put back as the layout in use has them or *Reset all buttons* is chosen. F1, F8, F10, F11 and Esc cannot be bound (the menu, the flight recorder and the window keep them). Punctuation keys are named by their place on a US keyboard; the menu shows the character the keyboard layout in use puts there.
+The *Controls* tab of the settings menu lists, under the button layout, every Switch button and the eight stick directions the keys drive (movement and camera), each with two key cells and a controller cell. Select a cell, press A or Enter, then press the new key, mouse button or controller button; Esc or five seconds without a press cancel, and a controller button cancels a key cell. Delete, Backspace or X clears the selected cell; while a cell waits for a press, clicking *Leave unbound* in its window leaves it empty. A key another action has moves to the new one (the description names the action it left); a controller button swaps with the one it replaces. A remapped controller button is physical: from then on the face buttons (A B X Y) stay where they are in both layouts, until the buttons are put back as the layout in use has them or *Reset all buttons* is chosen. *Open menu* is a row too: Esc by default, with no controller button until one is bound. F1, F8, F10 and F11 cannot be bound, and Esc cannot be captured because it cancels (*Reset all buttons* puts it back on Open menu). Punctuation keys are named by their place on a US keyboard; the menu shows the character the keyboard layout in use puts there.
 
 The tab writes `totk.ini` lines, one per Switch button or stick direction: `bind_<button> = <entry>, <entry>, ...`. The button is `A B X Y L R ZL ZR PLUS MINUS LEFT UP RIGHT DOWN LCLICK RCLICK`, or a stick direction `LSTICK_LEFT LSTICK_UP LSTICK_RIGHT LSTICK_DOWN` (movement, W A S D by default) and `RSTICK_...` (camera, the arrow keys). An entry is `pad:<name>` or `key:<name>`:
 

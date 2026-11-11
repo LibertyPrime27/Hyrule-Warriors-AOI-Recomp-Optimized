@@ -72,8 +72,15 @@ static int key_vk(int key) {
     case KEY_SLASH: return VK_OEM_2;
     case KEY_BACKSLASH: return VK_OEM_5;
     case KEY_GRAVE: return VK_OEM_3;
+    case KEY_ESCAPE: return VK_ESCAPE;
     }
     return 0;
+}
+
+int input_key_of_vk(unsigned vk) {
+    for (int k = 1; k < KEY_COUNT; k++)
+        if (key_vk(k) == (int)vk) return k;
+    return KEY_NONE;
 }
 
 uint32_t input_key_char(int key) {
@@ -150,8 +157,11 @@ int input_window_msg(HWND h, UINT m, WPARAM w, LPARAM l, LRESULT *res) {
     case WM_SYSCOMMAND:   // Alt pressed alone would enter the window menu loop, which stalls the game: Alt is a game key
         if ((w & 0xFFF0) == SC_KEYMENU && l == 0) { *res = 0; return 1; }
         break;
-    case WM_KEYDOWN:   // Esc is unbound in the game layout: it releases the cursor and opens the menu (menu_window_msg)
-        if (w == VK_ESCAPE && !(cur_rel & CUR_REL)) { cur_rel_update(rel_esc); cursor_update(h); }
+    case WM_KEYDOWN:   // Esc and the menu key release the cursor; the menu key opens the menu (menu_window_msg)
+        if ((w == VK_ESCAPE || input_map_key_opens_menu(input_key_of_vk((unsigned)w))) && !(cur_rel & CUR_REL)) {
+            cur_rel_update(rel_esc);
+            cursor_update(h);
+        }
         break;
     case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN:   // client area only; poll_merged drops the click
         if (cur_rel & CUR_REL) { cur_rel_update(rel_clear); cursor_update(h); }

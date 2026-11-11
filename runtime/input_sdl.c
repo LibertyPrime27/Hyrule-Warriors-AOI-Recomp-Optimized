@@ -79,6 +79,7 @@ static SDL_Scancode key_sc(int key) {
     case KEY_SLASH: return SDL_SCANCODE_SLASH;
     case KEY_BACKSLASH: return SDL_SCANCODE_BACKSLASH;
     case KEY_GRAVE: return SDL_SCANCODE_GRAVE;
+    case KEY_ESCAPE: return SDL_SCANCODE_ESCAPE;
     }
     return SDL_SCANCODE_UNKNOWN;
 }
@@ -96,6 +97,8 @@ static int key_of_sc(SDL_Scancode sc) {
     }
     return sc > 0 && sc < SDL_SCANCODE_COUNT ? map[sc] : 0;
 }
+
+int input_key_of_scancode(int sc) { return key_of_sc((SDL_Scancode)sc); }
 
 static int mouse_key(uint8_t button) {
     switch (button) {

@@ -23,7 +23,11 @@ extern "C" {
 
 // ---- state, any thread
 int menu_is_open(void);
-void menu_toggle(void);                   // F1 / Esc on the keyboard, Minus+Plus on the pad
+void menu_toggle(void);                   // F1 / the menu key (Esc) on the keyboard; Minus+Plus or a bound button on the pad
+int menu_binding_capture(void);           // a remapping cell waits for a press: the menu button does not toggle
+int input_key_of_vk(unsigned vk);         // input_win.c: the key id of a Win32 virtual key, 0 for none
+int input_key_of_scancode(int sc);        // input_sdl.c: the key id of an SDL scancode, 0 for none
+int input_map_key_opens_menu(int key);    // input_map.c: key is bound to Open menu for either player
 void menu_perf_cycle(void);               // F10: the performance overlay off, fps, full
 
 // ---- events from the window adapter, used only while the menu is open. key: an ImGuiKey; coordinates in pixels of the

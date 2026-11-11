@@ -171,8 +171,10 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_TYPE_PRO] = "Pro Controller", [UI_MENU_TYPE_DUAL] = "Joy-Con pair",
     [UI_MENU_PLAYER2_OFF_NOTE] = "not connected",
 
-    [UI_BINDS_HELP] = "Select a cell and press A or Enter, then the key, mouse button or controller button. Delete or "
-                      "X clears a cell. A key in use moves here; a controller button swaps with the one it replaces.",
+    [UI_BINDS_HELP] = "Select a cell and press A or Enter, then the key, mouse button or controller button, or click "
+                      "Leave unbound to leave it empty. Delete or X also clears a cell. A key in use moves here; a "
+                      "controller button swaps with the one it replaces.",
+    [UI_BINDS_UNBIND] = "Leave unbound",
     [UI_BINDS_COL_KEY1] = "Key 1", [UI_BINDS_COL_KEY2] = "Key 2", [UI_BINDS_COL_PAD] = "Controller",
     [UI_BINDS_GROUP_BUTTONS] = "Buttons", [UI_BINDS_GROUP_MOVE] = "Movement", [UI_BINDS_GROUP_CAMERA] = "Camera",
     [UI_BINDS_PRESS_KEY] = "Press a key or mouse button for %s",
@@ -189,7 +191,9 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_BIND_LSTICK_LEFT] = "Move left", [UI_BIND_LSTICK_UP] = "Move forward", [UI_BIND_LSTICK_RIGHT] = "Move right",
     [UI_BIND_LSTICK_DOWN] = "Move back",
     [UI_BIND_RSTICK_LEFT] = "Camera left", [UI_BIND_RSTICK_UP] = "Camera up", [UI_BIND_RSTICK_RIGHT] = "Camera right",
-    [UI_BIND_RSTICK_DOWN] = "Camera down",
+    [UI_BIND_RSTICK_DOWN] = "Camera down", [UI_BIND_MENU] = "Open menu",
+    [UI_BIND_DESC_MENU] = "Opens and closes this menu. Esc on the keyboard; controllers have no button for it until you "
+                          "bind one. Held for half a second, that controller button presses Minus (map) instead.",
     [UI_BIND_DESC_A] = "Interact, pick up, talk.", [UI_BIND_DESC_B] = "Run, cancel, go back.",
     [UI_BIND_DESC_X] = "Jump.", [UI_BIND_DESC_Y] = "Attack.", [UI_BIND_DESC_LCLICK] = "Crouch.",
     [UI_BIND_DESC_RCLICK] = "First-person view.", [UI_BIND_DESC_L] = "Abilities.",
@@ -457,6 +461,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_TYPE_PRO] = "Pro Controller", [UI_MENU_TYPE_DUAL] = "Пара Joy-Con",
     [UI_MENU_PLAYER2_OFF_NOTE] = "не подключён",
 
+    [UI_BINDS_UNBIND] = "Оставить пустым",
     [UI_BINDS_HELP] = "Выберите ячейку и нажмите A или Enter, затем клавишу, кнопку мыши или кнопку контроллера. "
                       "Delete или X очищает ячейку. Занятая клавиша переходит сюда; кнопка контроллера меняется "
                       "местами с той, которую заменяет.",
@@ -479,6 +484,9 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_BIND_LSTICK_DOWN] = "Назад",
     [UI_BIND_RSTICK_LEFT] = "Камера влево", [UI_BIND_RSTICK_UP] = "Камера вверх",
     [UI_BIND_RSTICK_RIGHT] = "Камера вправо", [UI_BIND_RSTICK_DOWN] = "Камера вниз",
+    [UI_BIND_MENU] = "Открыть меню",
+    [UI_BIND_DESC_MENU] = "Открывает и закрывает это меню. Esc на клавиатуре; на контроллере кнопки нет, пока вы её не "
+                          "назначите. Удержание этой кнопки полсекунды нажимает Минус (карта).",
     [UI_BIND_DESC_A] = "Взаимодействие, подобрать, поговорить.", [UI_BIND_DESC_B] = "Бег, отмена, назад.",
     [UI_BIND_DESC_X] = "Прыжок.", [UI_BIND_DESC_Y] = "Атака.", [UI_BIND_DESC_LCLICK] = "Присесть.",
     [UI_BIND_DESC_RCLICK] = "Вид от первого лица.", [UI_BIND_DESC_L] = "Способности.",

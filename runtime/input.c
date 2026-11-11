@@ -597,6 +597,8 @@ static void feed_apply(uint64_t *buttons, int32_t left[2], int32_t right[2]) {
 
 // Player p's controller: the gamepads and, when it owns them, the keyboard and mouse that feed it (assign). Returns 1
 // when the player has a device (player 1 always counts as connected). Script, feed and recording belong to player 1.
+#define MENU_HOLD_MINUS_NS 500000000ull   // the menu button held this long is Minus (poll_player)
+
 static int poll_player(int p, uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
     uint64_t b = 0;
     int32_t sl[2] = {0, 0}, sr[2] = {0, 0};
@@ -642,6 +644,25 @@ static int poll_player(int p, uint64_t *buttons, int32_t *lx, int32_t *ly, int32
         feed_apply(&b, sl, sr);
         rec_apply(b, sl, sr);
     }
+    // The menu button (B_MENU: a gamepad button the player bound, none by default; only gamepads set its bit, the
+    // keyboard's menu key, Esc, is the window's): a tap opens or closes the menu when released; held for half a second
+    // it is the game's Minus (the map) until released, so binding it to Back keeps the map. A press that began while a remapping cell waited (it is being bound)
+    // does nothing. The game never sees the bit.
+    static uint64_t menu_down_at[INPUT_PLAYERS];
+    static int menu_held_minus[INPUT_PLAYERS], menu_press_ignored[INPUT_PLAYERS];
+    int menu_tap = 0;
+    if (b & 1ull << B_MENU) {
+        uint64_t t = plat_now_ns();
+        if (!menu_down_at[p]) menu_down_at[p] = t ? t : 1, menu_press_ignored[p] = menu_binding_capture();
+        else if (!menu_held_minus[p] && !menu_press_ignored[p] && !menu_is_open() &&
+                 t - menu_down_at[p] >= MENU_HOLD_MINUS_NS)
+            menu_held_minus[p] = 1;
+        if (menu_held_minus[p]) b |= 1ull << B_MINUS;
+    } else if (menu_down_at[p]) {
+        menu_tap = !menu_held_minus[p] && !menu_press_ignored[p] && !menu_binding_capture();
+        menu_down_at[p] = 0, menu_held_minus[p] = 0;
+    }
+    b &= ~(1ull << B_MENU);
     // Minus and Plus held together (gamepad or keys) open or close the menu and never reach the game; either player can
     static int combo_held[INPUT_PLAYERS];
     int32_t st[4] = {sl[0], sl[1], sr[0], sr[1]};
@@ -650,7 +671,7 @@ static int poll_player(int p, uint64_t *buttons, int32_t *lx, int32_t *ly, int32
     int overlay = input_overlay_gate(&overlay_held[p], &b);
     sl[0] = st[0], sl[1] = st[1], sr[0] = st[2], sr[1] = st[3];
     plat_mutex_unlock(&lock);
-    if (toggle) menu_toggle();
+    if (toggle || menu_tap) menu_toggle();
     if (overlay) menu_perf_cycle();
     stick_bits(&b, sl[0], sl[1], B_SL_LEFT);
     stick_bits(&b, sr[0], sr[1], B_SR_LEFT);

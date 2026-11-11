@@ -11,10 +11,16 @@
 enum {
     B_A = 0, B_B, B_X, B_Y, B_STICK_L, B_STICK_R, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN,
     B_SL_LEFT = 16, B_SL_UP, B_SL_RIGHT, B_SL_DOWN, B_SR_LEFT, B_SR_UP, B_SR_RIGHT, B_SR_DOWN,
-    ACTION_COUNT = 24
+    // Not a Switch button: opens the menu (Esc by default; no gamepad button unless bound). input.c takes its bit off
+    // before the game sees it.
+    B_MENU = 24,
+    ACTION_COUNT = 25
 };
+// Actions a gamepad button can drive: the Switch buttons and the menu (the stick directions take keys only).
+#define INPUT_IS_BUTTON(a) ((a) < B_SL_LEFT || (a) == B_MENU)
 
-// Keys and mouse buttons. F1, F10, F11 and Esc belong to the menu and the window, F8 to the flight recorder: no ids.
+// Keys and mouse buttons. F1, F10 and F11 belong to the menu and the window, F8 to the flight recorder: no ids. Esc is
+// the default menu key (B_MENU) and always cancels a key capture, so the remapping rows never bind it.
 enum {
     KEY_NONE = 0,
     KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, KEY_F, KEY_G, KEY_H, KEY_I, KEY_J, KEY_K, KEY_L, KEY_M,   // letters and digits are
@@ -30,6 +36,7 @@ enum {
     // the punctuation keys of a US keyboard, by position; the character on the key follows the keyboard layout
     KEY_MINUS, KEY_EQUALS, KEY_LBRACKET, KEY_RBRACKET, KEY_SEMICOLON, KEY_APOSTROPHE, KEY_COMMA, KEY_PERIOD, KEY_SLASH,
     KEY_BACKSLASH, KEY_GRAVE,
+    KEY_ESCAPE,
     KEY_COUNT
 };
 
@@ -71,6 +78,9 @@ InputMap *input_map_player(int player);
 void input_bind_var(int player, int action, char *out, size_t n);
 
 void input_map_reset(void);
+// 1 when key opens the menu for either player (bound to B_MENU). Read by the window thread unlocked: a race with a
+// remap only decides one key press.
+int input_map_key_opens_menu(int key);
 // The script and totk.ini names, any case when parsed; NULL for an id without one. Actions: A B X Y LCLICK RCLICK L R ZL
 // ZR PLUS MINUS LEFT UP RIGHT DOWN, then LSTICK_LEFT LSTICK_UP LSTICK_RIGHT LSTICK_DOWN and the same for RSTICK (the
 // stick directions the keys drive). Keys: a-z 0-9 space tab lshift ... (key_names in input_map.c). Pads: south east ...

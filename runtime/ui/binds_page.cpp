@@ -18,7 +18,7 @@ extern "C" {
 void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 }
 
-static_assert(UI_BIND_RSTICK_DOWN - UI_BIND_A == ACTION_COUNT - 1, "UI_BIND_* follow the actions");
+static_assert(UI_BIND_MENU - UI_BIND_A == ACTION_COUNT - 1, "UI_BIND_* follow the actions");
 static_assert(UI_BIND_DESC_MINUS - UI_BIND_DESC_A == B_MINUS, "UI_BIND_DESC_* follow the actions");
 static_assert(UI_KEY_PAGEDOWN - UI_KEY_SPACE == KEY_PAGEDOWN - KEY_SPACE, "UI_KEY_* follow the key ids");
 static_assert(UI_PAD_RPADDLE2 - UI_PAD_SOUTH == PAD_RPADDLE2 - PAD_SOUTH && PAD_RPADDLE2 == PAD_COUNT - 1,
@@ -38,8 +38,8 @@ static void bind_key(int action, char *out, size_t n) {
 // land on the window, not on a cell (a new capture), on Continue or as Esc closing the menu.
 static const uint64_t kDoneNs = 350000000ull;
 
-static const int kButtons[] = {B_A, B_B, B_X, B_Y, B_L, B_R, B_ZL, B_ZR, B_STICK_L, B_STICK_R, B_PLUS, B_MINUS,
-                               B_UP, B_DOWN, B_LEFT, B_RIGHT};
+static const int kButtons[] = {B_MENU, B_A, B_B, B_X, B_Y, B_L, B_R, B_ZL, B_ZR, B_STICK_L, B_STICK_R, B_PLUS,
+                               B_MINUS, B_UP, B_DOWN, B_LEFT, B_RIGHT};
 static const int kMove[] = {B_SL_UP, B_SL_DOWN, B_SL_LEFT, B_SL_RIGHT};
 static const int kCamera[] = {B_SR_UP, B_SR_DOWN, B_SR_LEFT, B_SR_RIGHT};
 
@@ -55,6 +55,7 @@ static uint64_t g_note_until;
 static const char *action_label(int a) { return menu_text((UiTextId)(UI_BIND_A + a)); }
 
 static UiTextId action_desc(int a) {
+    if (a == B_MENU) return UI_BIND_DESC_MENU;
     if (a <= B_MINUS) return (UiTextId)(UI_BIND_DESC_A + a);
     if (a <= B_DOWN) return UI_BIND_DESC_DPAD;
     return a <= B_SL_DOWN ? UI_BIND_DESC_MOVE : UI_BIND_DESC_CAMERA;
@@ -74,6 +75,7 @@ static void utf8(uint32_t c, char *out, size_t n) {
 // layout in use, else its totk.ini name in capitals (letters, digits, F keys).
 static const char *key_label(int k, char *buf, size_t n) {
     if (k == KEY_NONE) return "";
+    if (k == KEY_ESCAPE) return "Esc";
     if (k >= KEY_SPACE && k <= KEY_PAGEDOWN) return menu_text((UiTextId)(UI_KEY_SPACE + (k - KEY_SPACE)));
     if (k >= KEY_NUM0 && k <= KEY_NUM_DECIMAL) {
         static const char *const ops[] = {"+", "-", "*", "/", "."};
@@ -171,13 +173,13 @@ static void reset_binds(void) {
 static void row_action(int a, const InputMap &m, int layout) {
     uint8_t k[INPUT_BINDING_MAX], p[INPUT_PAD_BINDING_MAX];
     int nk = input_map_keys_of(&m, a, k, INPUT_BINDING_MAX);
-    int np = a < B_SL_LEFT ? input_map_pads_of(&m, a, layout, p, INPUT_PAD_BINDING_MAX) : 0;
+    int np = INPUT_IS_BUTTON(a) ? input_map_pads_of(&m, a, layout, p, INPUT_PAD_BINDING_MAX) : 0;
     char b0[48], b1[48];
     const char *cells[3] = {nk > 0 ? key_label(k[0], b0, sizeof b0) : "", nk > 1 ? key_label(k[1], b1, sizeof b1) : "",
-                            a >= B_SL_LEFT ? menu_text(a <= B_SL_DOWN ? UI_PAD_LSTICK : UI_PAD_RSTICK)
+                            !INPUT_IS_BUTTON(a) ? menu_text(a <= B_SL_DOWN ? UI_PAD_LSTICK : UI_PAD_RSTICK)
                             : np           ? pad_label(p[0])
                                            : ""};
-    const bool enabled[3] = {true, true, a < B_SL_LEFT};   // the sticks stay sticks
+    const bool enabled[3] = {true, true, INPUT_IS_BUTTON(a)};   // the sticks stay sticks
     char key[40];
     bind_key(a, key, sizeof key);
     const char *note = g_note_action == a && plat_now_ns() < g_note_until ? g_note : nullptr;
@@ -196,6 +198,9 @@ static void row_action(int a, const InputMap &m, int layout) {
 
 // The window over the page while a cell waits: the press is polled from the devices (input_capture), so the menu's own
 // keys (Enter, arrows, Q / E) bind like any other. Esc or the timeout cancels; a controller button cancels a key cell.
+// Its Leave unbound button clears the cell: a left click is a press like any other, so one made while the pointer was
+// over the button (the frame before) clears instead of binding the mouse button.
+static bool g_unbind_hot;
 static void capture_window(void) {
     if (g_cap.action < 0) return;
     if (!ImGui::IsPopupOpen("##bind_capture")) ImGui::OpenPopup("##bind_capture");
@@ -204,9 +209,14 @@ static void capture_window(void) {
     if (!g_cap.done) {
         int id = 0, got = input_capture(g_cap.reset, &id);
         g_cap.reset = false;
-        if (got == INPUT_CAPTURE_KEY && !pad_cell) change(g_cap.action, g_cap.cell, id);
-        if (got == INPUT_CAPTURE_PAD && pad_cell) change(g_cap.action, g_cap.cell, id);
-        if (got != INPUT_CAPTURE_NONE && !(got == INPUT_CAPTURE_KEY && pad_cell)) g_cap.done = now;
+        if (got == INPUT_CAPTURE_KEY && id == KEY_MOUSE_L && g_unbind_hot) {
+            change(g_cap.action, g_cap.cell, 0);   // KEY_NONE / PAD_NONE: nothing
+            g_cap.done = now;
+        } else {
+            if (got == INPUT_CAPTURE_KEY && !pad_cell) change(g_cap.action, g_cap.cell, id);
+            if (got == INPUT_CAPTURE_PAD && pad_cell) change(g_cap.action, g_cap.cell, id);
+            if (got != INPUT_CAPTURE_NONE && !(got == INPUT_CAPTURE_KEY && pad_cell)) g_cap.done = now;
+        }
         if (now - g_cap.start > CAPTURE_SECONDS * 1000000000ull) g_cap.done = now;
     }
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
@@ -218,6 +228,8 @@ static void capture_window(void) {
         int left = CAPTURE_SECONDS - (int)((now - g_cap.start) / 1000000000ull);
         snprintf(t, sizeof t, menu_text(UI_BINDS_CANCEL_HINT), left < 1 ? 1 : left);
         ImGui::TextDisabled("%s", t);
+        ImGui::Button(menu_text(UI_BINDS_UNBIND));   // acted on through the capture above
+        g_unbind_hot = !g_cap.done && ImGui::IsItemHovered();
         if (g_cap.done && now - g_cap.done > kDoneNs) {
             ImGui::CloseCurrentPopup();
             char key[40], id[48];
@@ -225,12 +237,14 @@ static void capture_window(void) {
             snprintf(id, sizeof id, "%s#%d", key, g_cap.cell);
             opt_focus_key(id);   // back on the cell it came from
             g_cap.action = -1;
+            g_unbind_hot = false;
         }
         ImGui::EndPopup();
     }
 }
 
 bool binds_modal(void) { return g_cap.action >= 0; }
+extern "C" int menu_binding_capture(void) { return g_cap.action >= 0; }
 
 static bool g_reset_asked;   // the reset row was chosen this frame (acted on after the page)
 

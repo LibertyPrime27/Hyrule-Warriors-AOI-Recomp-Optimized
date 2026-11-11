@@ -45,7 +45,8 @@ extern "C" void menu_sdl_event(const SDL_Event *e) {
     case SDL_EVENT_KEY_DOWN:
         // Esc with the menu open (opened by F1 too) is not a toggle here: it goes to the menu, which closes itself
         if (!e->key.repeat && (e->key.scancode == SDL_SCANCODE_F1 ||
-                               (e->key.scancode == SDL_SCANCODE_ESCAPE && !menu_is_open()))) {
+                               (input_map_key_opens_menu(input_key_of_scancode(e->key.scancode)) &&
+                                (!menu_is_open() || (e->key.scancode != SDL_SCANCODE_ESCAPE && !menu_binding_capture()))))) {
             menu_toggle();
             return;
         }
