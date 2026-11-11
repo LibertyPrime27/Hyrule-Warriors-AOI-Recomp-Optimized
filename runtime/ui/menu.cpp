@@ -629,7 +629,8 @@ static void rows_color(void) {
 
 static void tab_screen(float scale) {
     opt_begin("##screen", scale);
-    opt_toggle("TOTK_FULLSCREEN", UI_MENU_FULLSCREEN, UI_MENU_FULLSCREEN_DESC);
+    static const UiTextId fullscreen[] = {UI_MENU_WINDOWED, UI_MENU_FULLSCREEN_MODE};   // TOTK_FULLSCREEN 0, 1
+    opt_choice("TOTK_FULLSCREEN", UI_MENU_FULLSCREEN, fullscreen, 2, UI_MENU_FULLSCREEN_DESC);
     row_window_size();
     static const UiTextId present[] = {UI_MENU_PRESENT_MAILBOX, UI_MENU_PRESENT_VSYNC, UI_MENU_PRESENT_IMMEDIATE};
     opt_choice("TOTK_VK_PRESENT", UI_MENU_PRESENT, present, 3, UI_MENU_PRESENT_DESC, present_note());

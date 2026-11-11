@@ -36,7 +36,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_SAVE_FAILED] = "could not save settings",
     [UI_MENU_VERSION] = RT_GAME_TITLE " %s",
 
-    [UI_MENU_FULLSCREEN] = "Fullscreen", [UI_MENU_FULLSCREEN_DESC] = "Fills the screen with the game; F11 toggles it.",
+    [UI_MENU_FULLSCREEN] = "Fullscreen", [UI_MENU_WINDOWED] = "Windowed", [UI_MENU_FULLSCREEN_MODE] = "Fullscreen", [UI_MENU_FULLSCREEN_DESC] = "Fills the screen with the game; F11 toggles it.",
     [UI_MENU_WINDOW_SIZE] = "Window size", [UI_MENU_WINDOW_SIZE_DESC] = "Size of the game window when not fullscreen.",
     [UI_MENU_WINDOW_SIZE_CUSTOM] = "Custom",
     [UI_MENU_PRESENT] = "Presentation", [UI_MENU_PRESENT_DESC] = "How finished frames reach the screen.",
@@ -329,7 +329,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_SAVE_FAILED] = "не удалось сохранить настройки",
     [UI_MENU_VERSION] = RT_GAME_TITLE " %s",
 
-    [UI_MENU_FULLSCREEN] = "Полный экран", [UI_MENU_FULLSCREEN_DESC] = "Игра на весь экран; F11 переключает режим.",
+    [UI_MENU_FULLSCREEN] = "Полный экран", [UI_MENU_WINDOWED] = "В окне", [UI_MENU_FULLSCREEN_MODE] = "Полный экран", [UI_MENU_FULLSCREEN_DESC] = "Игра на весь экран; F11 переключает режим.",
     [UI_MENU_WINDOW_SIZE] = "Размер окна", [UI_MENU_WINDOW_SIZE_DESC] = "Размер окна игры вне полноэкранного режима.",
     [UI_MENU_WINDOW_SIZE_CUSTOM] = "Другой",
     [UI_MENU_PRESENT] = "Вывод кадров", [UI_MENU_PRESENT_DESC] = "Как готовые кадры попадают на экран.",
