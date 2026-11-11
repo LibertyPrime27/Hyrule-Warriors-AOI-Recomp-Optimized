@@ -422,15 +422,34 @@ static int child_exchange(Svc *v, const char *line, char *reply, size_t reply_si
     return ok;
 }
 
-// Children allowed at run time: TOTK_XLATE_PROCS, default 2.
+// Children allowed at run time: TOTK_XLATE_PROCS, default a quarter of the logical processors, 2 to 6. A new scene
+// registers about 140 compute shaders, the largest taking a second or two each; with 2 children the backlog was not
+// through 45 s later, and the first dispatches translated their shaders again while the frame froze.
 static int svc_runtime_limit(void) {
     static volatile int32_t n;
     if (!n) {
         const char *e = cfg_get("TOTK_XLATE_PROCS");
-        int v = e && *e ? atoi(e) : 2;
+        int cpus = (int)plat_cpu_count() / 4, v = e && *e ? atoi(e) : cpus < 2 ? 2 : cpus > 6 ? 6 : cpus;
         plat_xchg32(&n, v < 1 ? 1 : v > MAX_SVC ? MAX_SVC : v);
     }
     return (int)n;
+}
+
+// The background workers (t_background) share S.limit children. Any other thread (the render thread translating a
+// compute shader or a one-shot draw's stage) may also use one spare child, so it never waits for a background job to
+// finish: during a new scene the queue can hold a thousand shaders and every wait froze the frame.
+#define SVC_SPARE 1
+static _Thread_local int t_background;
+
+// A translation a foreground thread (the render thread) waited 20 ms or more for: what freezes a new scene's first
+// frames. why: "dispatch" (synchronous: compute), "one-shot draw" (gfx_shader_await).
+static void wait_note(int stage, const char *why, uint64_t t0) {
+    static volatile int32_t told;
+    uint64_t ns = perf_begin() - t0;
+    if (ns < 20000000 || plat_inc32(&told) > 300) return;
+    rt_log("gfx_shader: the render thread waited %.1f ms for a %s shader (%s)", ns / 1e6,
+           stage == GFX_STAGE_CS ? "compute" : stage == GFX_STAGE_VS ? "vertex" : stage == GFX_STAGE_FS ? "fragment" : "geometry",
+           why);
 }
 
 static int svc_used(void) {                                // caller holds S.lock
@@ -452,7 +471,7 @@ static Svc *svc_get(void) {
             if (!c->busy && c->child) v = c;
             else if (!c->busy && !empty) empty = c;
         }
-        if (!v && empty && svc_used() < S.limit) v = empty;
+        if (!v && empty && svc_used() < S.limit + (t_background ? 0 : SVC_SPARE)) v = empty;
         if (v) break;
         plat_cond_wait(&S.freed, &S.lock);
     }
@@ -464,7 +483,7 @@ static Svc *svc_get(void) {
 // Returns a child; one over the limit (svc_set_limit lowered it) is stopped.
 static void svc_put(Svc *v) {
     plat_mutex_lock(&S.lock);
-    int stop = v->child && svc_used() > S.limit;
+    int stop = v->child && svc_used() > S.limit + SVC_SPARE;
     if (!stop) v->busy = 0;
     plat_mutex_unlock(&S.lock);
     if (stop) {
@@ -482,7 +501,7 @@ static void svc_set_limit(int n) {
     int k = 0;
     plat_mutex_lock(&S.lock);
     S.limit = n < 1 ? 1 : n > MAX_SVC ? MAX_SVC : n;
-    for (int i = 0, used = svc_used(); i < MAX_SVC && used > S.limit; i++)
+    for (int i = 0, used = svc_used(); i < MAX_SVC && used > S.limit + SVC_SPARE; i++)
         if (!S.s[i].busy && S.s[i].child) S.s[i].busy = 1, stop[k++] = &S.s[i], used--;
     plat_mutex_unlock(&S.lock);
     for (int i = 0; i < k; i++) child_stop(stop[i]);
@@ -1778,6 +1797,8 @@ static const GfxShader *get_async_one(Req r, int stage, const uint8_t *control, 
 
 static int known_failed(const uint8_t key[32]);
 static void note_failed(const uint8_t key[32]);
+static void drop_prefetched(const uint8_t code_hash[32]);
+static _Thread_local int t_alt_hit;                        // the last get_one answered from a prefetched alternate
 
 // The synchronous path (compute dispatches, awaited stages) remembers failures as the background one does
 // (X.waits): a shader that does not translate is not sent to the translator again on every dispatch or draw.
@@ -1789,6 +1810,7 @@ static const GfxShader *get_one(const Req *r, int stage, const uint8_t *control,
     paths();
     if (!cache_dir[0]) return fail("no cache directory", NULL);
     if (r->final && (s = request_disk_load(r, r->key, r->iid))) return plat_inc64(&n_hits), mem_insert(s);
+    drop_prefetched(r->code_hash);                         // this translation replaces it
     const GfxShader *t = translate(r, stage, control, code, a);
     if (!t) note_failed(r->key);
     return t;
@@ -1798,8 +1820,11 @@ const GfxShader *gfx_shader_get(int stage, const uint8_t *control, const uint8_t
                                 const uint8_t *c1, const GfxShaderAnswers *a) {
     Req r;
     if (!req_init(&r, stage, control, code, code_size, c1, a)) return NULL;
+    uint64_t t0 = t_background ? 0 : perf_begin();
+    t_alt_hit = 0;
     const GfxShader *s = get_one(&r, stage, control, code, a);
-    if (s) ans_note(&r, stage, control, code, a, s);
+    if (t0) wait_note(stage, stage == GFX_STAGE_CS ? "dispatch" : "synchronous", t0);
+    if (s && !t_alt_hit) ans_note(&r, stage, control, code, a, s);
     return s;
 }
 
@@ -1965,6 +1990,48 @@ static void dump_failed_request(const char *hex, const char *request, const char
            hex, packet);
 }
 
+// ---- prefetched alternates (gfx_shader_prefetch)
+// A prefetch guesses its answers. The cache key keeps a slot's texture type, image type and image format together when
+// the translation read either kind (UseMask), so a guess right about everything the translation read can still name
+// another key: in this game every compute dispatch has a 2D image at slot 0, whose texture type alone the large compute
+// shaders read. A request takes the prefetched shader of its code when the answers agree on the texture types of
+// tex_queried, the image types and formats of img_queried and every other field; the SPIR-V depends on nothing else.
+#define ALT_N 1024
+static struct { uint8_t code_hash[32]; GfxShaderAnswers a; const GfxShader *s; } alt[ALT_N];
+static PlatMutex alt_lock = PLAT_MUTEX_INIT;
+
+static uint32_t alt_slot(const uint8_t h[32]) { return (h[0] | (uint32_t)h[1] << 8) & (ALT_N - 1); }
+
+static void alt_put(const uint8_t h[32], const GfxShaderAnswers *a, const GfxShader *sh) {
+    if (!sh) return;
+    plat_mutex_lock(&alt_lock);
+    uint32_t i = alt_slot(h);
+    memcpy(alt[i].code_hash, h, 32), alt[i].a = *a, alt[i].s = sh;
+    plat_mutex_unlock(&alt_lock);
+}
+
+static const GfxShader *alt_get(const Req *r, const GfxShaderAnswers *a) {
+    GfxShaderAnswers have;
+    const GfxShader *sh = NULL;
+    plat_mutex_lock(&alt_lock);
+    uint32_t i = alt_slot(r->code_hash);
+    if (alt[i].s && !memcmp(alt[i].code_hash, r->code_hash, 32)) sh = alt[i].s, have = alt[i].a;
+    plat_mutex_unlock(&alt_lock);
+    if (!sh || !a || !shader_matches_request(sh, r)) return NULL;
+    uint32_t tq = json_slot_mask(sh->reflection, "tex_queried"), iq = json_slot_mask(sh->reflection, "img_queried");
+    for (int k = 0; k < 32; k++) {
+        if ((tq >> k & 1) && a->tex_type[k] != have.tex_type[k]) return NULL;
+        if ((iq >> k & 1) && (a->img_type[k] != have.img_type[k] || a->img_format[k] != have.img_format[k])) return NULL;
+    }
+    GfxShaderAnswers x = *a, y = have;                     // everything but the per-slot types agrees exactly
+    memset(x.tex_type, 0, sizeof x.tex_type), memset(x.img_type, 0, sizeof x.img_type);
+    memset(x.img_format, 0, sizeof x.img_format);
+    memset(y.tex_type, 0, sizeof y.tex_type), memset(y.img_type, 0, sizeof y.img_type);
+    memset(y.img_format, 0, sizeof y.img_format);
+    if (memcmp(&x, &y, sizeof x)) return NULL;
+    return sh;
+}
+
 static const GfxShader *translate_one(const Req *r, int stage, const uint8_t *control, const uint8_t *code,
                                       const GfxShaderAnswers *a) {
     const uint8_t *key = r->key;
@@ -1977,6 +2044,8 @@ static const GfxShader *translate_one(const Req *r, int stage, const uint8_t *co
     if (look && (s = mem_find(look)))
         return shader_matches_request(s, r) ? (plat_inc64(&n_hits), s) : fail("cached stage contract differs from request", NULL);
     if (look && (s = request_disk_load(r, look, look_iid))) return plat_inc64(&n_hits), mem_insert(s);
+    const GfxShader *same = alt_get(r, a);
+    if (same) return plat_inc64(&n_hits), t_alt_hit = 1, same;
 
     uint64_t skip = stage == GFX_STAGE_CS ? 0 : CODE_SKIP;
     char hex[65], code_path[PATH_CAP + 80], spv_path[PATH_CAP + 80], res_path[PATH_CAP + 80];
@@ -2048,6 +2117,7 @@ typedef struct XJob {
     Req r;                                                 // r.c1 points into code
     uint8_t *control, *code;
     GfxShaderAnswers a;
+    int prefetch;                                          // gfx_shader_prefetch: guessed answers, ahead of first use
 } XJob;
 
 typedef struct XWait {
@@ -2089,23 +2159,57 @@ static void note_failed(const uint8_t key[32]) {
     plat_mutex_unlock(&X.lock);
 }
 
+// Translates a job taken off the queue, then clears its key from X.waits (or marks it failed) and frees it.
+static void job_run(XJob *j) {
+    const GfxShader *s = translate(&j->r, j->stage, j->control, j->code, &j->a);
+    if (j->prefetch) alt_put(j->r.code_hash, &j->a, s);
+    plat_mutex_lock(&X.lock);
+    XWait **w = wait_slot(j->r.key), *e = *w;
+    if (e && s) *w = e->next, free(e);
+    else if (e) e->failed = 1;
+    plat_mutex_unlock(&X.lock);
+    plat_cond_broadcast(&X.done);
+    if (s) plat_inc64(&n_async);
+    free(j->control), free(j->code), free(j);
+}
+
+// Queued prefetch jobs of this code are dropped with their wait entries: a synchronous request with the real answers
+// is about to translate it, and the queued copy would repeat seconds of work on the backlog.
+static _Thread_local int t_prefetch;
+static void drop_prefetched(const uint8_t code_hash[32]) {
+    XJob *gone = NULL;
+    plat_mutex_lock(&X.lock);
+    for (XJob **p = &X.head, *prev = NULL; *p;) {
+        XJob *j = *p;
+        if (!j->prefetch || memcmp(j->r.code_hash, code_hash, 32)) {
+            prev = j, p = &j->next;
+            continue;
+        }
+        *p = j->next;
+        if (X.tail == j) X.tail = prev;
+        XWait **w = wait_slot(j->r.key), *e = *w;
+        if (e) *w = e->next, free(e);
+        j->next = gone, gone = j;
+    }
+    plat_mutex_unlock(&X.lock);
+    if (gone) plat_cond_broadcast(&X.done);
+    while (gone) {
+        XJob *j = gone;
+        gone = j->next;
+        free(j->control), free(j->code), free(j);
+    }
+}
+
 static void xlate_worker(void *arg) {
     (void)arg;
+    t_background = 1;
     for (;;) {
         plat_mutex_lock(&X.lock);
         while (!X.head) plat_cond_wait(&X.work, &X.lock);
         XJob *j = X.head;
         if (!(X.head = j->next)) X.tail = NULL;
         plat_mutex_unlock(&X.lock);
-        const GfxShader *s = translate(&j->r, j->stage, j->control, j->code, &j->a);
-        plat_mutex_lock(&X.lock);
-        XWait **w = wait_slot(j->r.key), *e = *w;
-        if (e && s) *w = e->next, free(e);
-        else if (e) e->failed = 1;
-        plat_mutex_unlock(&X.lock);
-        plat_cond_broadcast(&X.done);
-        if (s) plat_inc64(&n_async);
-        free(j->control), free(j->code), free(j);
+        job_run(j);
     }
     return;
 }
@@ -2150,7 +2254,7 @@ static const GfxShader *get_async_one(Req r, int stage, const uint8_t *control, 
     int queued = !raced && X.started == 1 && j && e && ctl && cd;
     if (queued) {
         memcpy(ctl, control, CONTROL_SIZE), memcpy(cd, code, r.length);
-        *j = (XJob){.stage = stage, .r = r, .control = ctl, .code = cd, .a = *a};
+        *j = (XJob){.stage = stage, .r = r, .control = ctl, .code = cd, .a = *a, .prefetch = t_prefetch};
         j->r.c1 = cd + (r.length - r.c1_len);
         memcpy(e->key, r.key, 32);
         *slot = e;
@@ -2172,24 +2276,43 @@ const GfxShader *gfx_shader_await(int stage, const uint8_t *control, const uint8
     const GfxShader *s = gfx_shader_get_async(stage, control, code, code_size, a, &pending);
     Req r;
     if (!pending || !req_init(&r, stage, control, code, code_size, NULL, a)) return s;
-    uint64_t p0 = perf_begin();   // the wait counts as the render thread's translation time
+    uint64_t p0 = perf_begin(), t0 = p0;   // the wait counts as the render thread's translation time
     plat_mutex_lock(&X.lock);
+    XJob *mine = NULL;
     for (XJob *j = X.head, *prev = NULL; j; prev = j, j = j->next)
-        if (!memcmp(j->r.key, r.key, 32)) {                // queued: to the front, the worker takes it next
-            if (prev) {
-                prev->next = j->next;
-                if (X.tail == j) X.tail = prev;
-                j->next = X.head, X.head = j;
-            }
+        if (!memcmp(j->r.key, r.key, 32)) {                // still queued: this thread translates it, not a worker
+            if (prev) prev->next = j->next;
+            else X.head = j->next;
+            if (X.tail == j) X.tail = prev;
+            mine = j;
             break;
         }
+    if (mine) {                                            // a worker already translating it is waited for below
+        plat_mutex_unlock(&X.lock);
+        job_run(mine);                                     // its exchange counted itself (child_exchange)
+        p0 = perf_begin();
+        plat_mutex_lock(&X.lock);
+    }
     XWait *w;
     while ((w = *wait_slot(r.key)) && !w->failed) plat_cond_wait(&X.done, &X.lock);
     plat_mutex_unlock(&X.lock);
     perf_end(PERF_XLATE, p0);
+    wait_note(stage, "one-shot draw", t0);
     if (w) return NULL;                                    // failed: logged by the worker
     s = gfx_shader_get_async(stage, control, code, code_size, a, &pending);
     return pending ? NULL : s;
+}
+
+int gfx_shader_prefetch(int stage, const uint8_t *control, const uint8_t *code, uint64_t code_size,
+                        const GfxShaderAnswers *a) {
+    Req r;
+    int pending = 0;
+    if (!req_init(&r, stage, control, code, code_size, NULL, a)) return 0;
+    t_prefetch = 1;
+    const GfxShader *s = get_async_one(r, stage, control, code, a, &pending);
+    t_prefetch = 0;
+    alt_put(r.code_hash, a, s);
+    return pending;
 }
 
 uint64_t gfx_shader_async_done(void) { return (uint64_t)n_async; }
@@ -2252,6 +2375,7 @@ typedef struct {
 
 static void warm_worker(void *arg) {
     Warm *w = arg;
+    t_background = 1;
     for (;;) {
         size_t i = (size_t)plat_inc64(&w->next) - 1;
         if (i >= w->n_named + w->n_other) return;
@@ -2679,6 +2803,7 @@ static void prg_collect(const uint8_t *rec, void *ctx) {
 
 static void prep_worker(void *arg) {
     Prep *p = arg;
+    t_background = 1;
     for (;;) {
         size_t i = (size_t)plat_inc64(&p->next) - 1;
         if (i >= p->n_ans) return;

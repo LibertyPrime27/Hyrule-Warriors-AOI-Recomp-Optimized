@@ -88,6 +88,7 @@ int plat_mem_read(uint64_t address, void *out, size_t size) {
 }
 static uint64_t serial_counter;
 uint64_t nvn_new_serial(void) {return ++serial_counter;}
+void vk_exec_program_registered(const prog_t *p) {(void)p;}   // the back end's early compute translations
 void gfx_shader_nvn2_dump(const uint8_t *ctl,const uint8_t *code) {(void)ctl;(void)code;dumps++;}
 static const uint8_t *lower_control, *lower_code;
 static int lower_success;

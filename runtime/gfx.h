@@ -58,8 +58,12 @@ const GfxShader *gfx_shader_get(int stage, const uint8_t *control, const uint8_t
 // NULL returned with *pending = 1 until it is ready. A failed translation stays failed (*pending = 0).
 const GfxShader *gfx_shader_get_async(int stage, const uint8_t *control, const uint8_t *code, uint64_t code_size,
                                       const GfxShaderAnswers *a, int *pending);
-// As gfx_shader_get_async, but a shader queued for translation is moved to the front of the queue and waited for.
-// NULL when the translation failed.
+// Queues a translation on the background workers ahead of its first use, with answers the caller guessed; nothing is
+// recorded as met in play. 1 when a translation is queued or running.
+int gfx_shader_prefetch(int stage, const uint8_t *control, const uint8_t *code, uint64_t code_size,
+                        const GfxShaderAnswers *a);
+// As gfx_shader_get_async, but a shader still queued for translation is translated by the calling thread (on a spare
+// translator), one a worker is translating is waited for. NULL when the translation failed.
 const GfxShader *gfx_shader_await(int stage, const uint8_t *control, const uint8_t *code, uint64_t code_size,
                                   const GfxShaderAnswers *a);
 uint64_t gfx_shader_async_done(void);                      // translations finished by the background worker

@@ -617,6 +617,7 @@ static int prog_set_shaders(prog_t *o, int n, const NVNshaderData *sd) {
     program_memory_allocated(owned, raw_bytes + portable_bytes);
     o->serial = nvn_new_serial();
     NVN_LOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)o, n, n ? (unsigned long long)next[0].data : 0ull);
+    vk_exec_program_registered(o);
     return 1;
 fail:
     free(owned);

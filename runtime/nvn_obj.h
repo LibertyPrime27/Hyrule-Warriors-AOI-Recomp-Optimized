@@ -89,6 +89,7 @@ typedef struct {
     uint64_t serial;                    // back-end resolved-result key
     uint8_t *owned_control;             // immutable raw NVN2 code/controls and portable controls; released after replay drains
 } prog_t;                                                                                FITS(prog_t, NVNprogram);
+void vk_exec_program_registered(const prog_t *p);      // vk_exec_draw.c: starts compute translations early
 _Static_assert(sizeof(prog_t) <= 0xa0, "NVN2 program allocation stride");
 
 typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;                            FITS(sync_t, NVNsync);

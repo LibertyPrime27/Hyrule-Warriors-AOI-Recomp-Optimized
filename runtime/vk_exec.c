@@ -573,15 +573,42 @@ static int tfr_match(const TargetFrames *e, const VkExecTarget *t) {
     return e->image == t->image && e->level == t->level && e->layer == t->base_layer;
 }
 
+// The scene's main render size: the largest level-0 target rendered in two presented frames in a row (the G-buffer and
+// the lighting and post-effect buffers of that size are drawn every frame). A new scene's first frame renders its
+// targets for the first time, so every draw would count as one-shot and wait for its shaders: on a cold shader cache
+// HWAoI's scene-load frames waited for about 60 new shaders one after another, 2.9 + 4.6 s of black screen (1.0.3,
+// cold-cache measurement). Targets of this size are per-frame buffers, so their draws are skipped until their shaders
+// are ready (translated in the background, in parallel) and show a frame or two later. TOTK_PIPE_SCENE=0: off.
+static uint32_t scene_w, scene_h;
+static uint64_t scene_at;   // the presented frame that last confirmed the size
+
+static void scene_size_note(const VkExecTarget *t, uint64_t stamp) {
+    uint64_t area = (uint64_t)t->width * t->height, have = (uint64_t)scene_w * scene_h;
+    if (t->level || area < 64 * 64) return;
+    if (area > have || (t->width == scene_w && t->height == scene_h) || stamp - scene_at > 600) {
+        if (t->width != scene_w || t->height != scene_h)
+            rt_log("vk_exec: scene render size %ux%u (per-frame targets; new-scene draws into them skip while shaders build)",
+                   t->width, t->height);
+        scene_w = t->width, scene_h = t->height, scene_at = stamp;
+    }
+}
+
+static int scene_sized(const VkExecTarget *t) {
+    static int on = -1;
+    if (on < 0) on = strcmp(cfg_value("TOTK_PIPE_SCENE"), "0") != 0;
+    return on && scene_w && !t->level && t->width == scene_w && t->height == scene_h;
+}
+
 static void tfr_note(const VkExecTarget *t, uint64_t stamp) {
     TargetFrames *e = tfr_slot(t);
     if (!tfr_match(e, t)) *e = (TargetFrames){t->image, t->level, t->base_layer, 0, 0};
     if (e->last != stamp) e->prev = e->last, e->last = stamp;
+    if (stamp && e->prev == stamp - 1) scene_size_note(t, stamp);
 }
 
 static int tfr_recent(const VkExecTarget *t, uint64_t stamp) {
     const TargetFrames *e = tfr_slot(t);
-    return tfr_match(e, t) && (e->last == stamp ? e->prev : e->last) == stamp - 1;
+    return (tfr_match(e, t) && (e->last == stamp ? e->prev : e->last) == stamp - 1) || scene_sized(t);
 }
 
 int vk_exec_targets_recent(VkExec *ex, int any) {

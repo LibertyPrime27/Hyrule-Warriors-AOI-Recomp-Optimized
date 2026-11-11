@@ -1427,7 +1427,9 @@ PlatChild *plat_child_start(const char *exe, const char *arg, uint32_t *err) {
     STARTUPINFOW si = {.cb = sizeof si, .dwFlags = STARTF_USESTDHANDLES, .hStdInput = in_r, .hStdOutput = out_w,
                        .hStdError = nul != INVALID_HANDLE_VALUE ? nul : out_w};
     PROCESS_INFORMATION pi;
-    BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    // Below normal: the shader translators work through a new scene's backlog on cores the game leaves idle, and
+    // never take the CPU from its threads.
+    BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, NULL, NULL, &si, &pi);
     DWORD e = GetLastError();
     CloseHandle(in_r);
     CloseHandle(out_w);
