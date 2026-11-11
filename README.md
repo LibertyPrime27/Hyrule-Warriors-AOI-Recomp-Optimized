@@ -82,6 +82,8 @@ The game's two-player mode works. Each player is a separate Switch controller fe
 
 When the game starts two-player mode, it asks for two controllers and receives both players set up here. The remapping rows have a **Bindings for: Player 1 / Player 2** row, so each player has their own keyboard and gamepad bindings.
 
+The key that opens the menu is a binding too: **Open menu** is Esc by default and has no controller button until you give it one. Held for half a second, a controller's Open menu button presses Minus (the map). Any binding can be cleared with **Leave unbound** in the "Press a key" window.
+
 Screen settings were cleaned up too:
 
 - **Fullscreen** is a Windowed / Fullscreen setting that applies live, as well as through F11.
@@ -115,7 +117,7 @@ The 30 / 60 / 90 / 120 FPS settings are available, both in the compiler (**Allow
 
 ## Current status
 
-**Current version: 1.0.4 (November 10, 2026).** Version 1.0.4 removes the multi-second freeze when a scene loads for the first time (now a short hitch of about 0.9 s on the test PC). Version 1.0.3 added two-player co-op with per-player input devices, controllers and bindings, plus a live docked/handheld switch. The game boots, plays the opening movies and reaches outdoor exploration and combat. A complete playthrough has not been verified.
+**Current version: 1.0.5 (November 11, 2026).** Version 1.0.5 makes the menu key rebindable (Esc by default, any controller button you choose) and adds Leave unbound for clearing a binding. Version 1.0.4 removed the multi-second freeze when a scene loads for the first time (now a short hitch of about 0.9 s on the test PC). Version 1.0.3 added two-player co-op with per-player input devices, controllers and bindings, plus a live docked/handheld switch. The game boots, plays the opening movies and reaches outdoor exploration and combat. A complete playthrough has not been verified.
 
 | | Part | Progress |
 | --- | --- | --- |
