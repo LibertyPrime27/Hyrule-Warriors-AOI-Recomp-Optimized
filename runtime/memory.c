@@ -52,6 +52,40 @@ enum { ATTR_PERMISSION_LOCKED = 16 };
 #define R_LIMIT_REACHED 0x10801u
 
 static RtGuestLayout L;
+
+// TOTK_LAZY_HEAP: 1 commits heap pages on first touch, 0 as SetHeapSize asks (all of it at once), auto (the default)
+// lazily only when Windows could not back the whole run otherwise. The game asks for a heap of nearly its whole pool
+// at boot (9.2 GiB), and Windows charges the GPU memory to the process as well (7-8 GiB measured with a 10 GiB card),
+// so on a 16 GiB PC with a small or disabled page file the commit limit is close. The lazy heap left 1.4 to 2 GiB of
+// it uncommitted in play but about doubled the hitches while loading (each first touch commits and zeroes 2 MiB), so
+// it is used only where the commit would not fit: free commit below the pool plus LAZY_AUTO_REST_MB.
+// TOTK_LAZY_HEAP_AUTO_FREE_MB pretends that much free commit (testing the decision).
+#define LAZY_AUTO_REST_MB 8192.0
+static int lazy_heap_wanted(uint64_t pool) {
+    const char *v = cfg_value("TOTK_LAZY_HEAP");
+    if (!strcmp(v, "0")) return 0;
+    if (strcmp(v, "auto")) return 1;
+#ifdef _WIN32
+    double proc = 0, used = 0, limit = 0;
+    plat_commit_info(&proc, &used, &limit);
+    const char *pretend = cfg_get("TOTK_LAZY_HEAP_AUTO_FREE_MB");
+    double free_mb = pretend && *pretend ? strtod(pretend, NULL) : limit - used;
+    if (!(pretend && *pretend) && (limit <= 0 || used < 0)) {
+        rt_log("memory: heap committed as the game asks (LAZY_HEAP=auto; the commit limit is unknown)");
+        return 0;
+    }
+    double need_mb = (double)pool / 1048576.0 + LAZY_AUTO_REST_MB;
+    int on = free_mb < need_mb;
+    rt_log("memory: heap %s (LAZY_HEAP=auto): %.0f MiB of commit free%s, about %.0f MiB needed (heap pool %.0f, GPU "
+           "memory and runtime %.0f); TOTK_LAZY_HEAP=0 or 1 forces either", on ? "committed on first touch" :
+           "committed as the game asks", free_mb, pretend && *pretend ? " (TOTK_LAZY_HEAP_AUTO_FREE_MB)" : "",
+           need_mb, (double)pool / 1048576.0, LAZY_AUTO_REST_MB);
+    return on;
+#else
+    (void)pool;
+    return 0;
+#endif
+}
 static uint64_t mods_lo, mods_hi;   // fixed module window
 static PlatMutex lock = PLAT_MUTEX_INIT;
 static uint64_t heap_size, alias_bytes;
@@ -339,7 +373,7 @@ void mem_init(void) {
         .pool = pool ? strtoull(pool, NULL, 0) : DEFAULT_POOL + res_heap_extra_bytes(),   // resolution.c
     };
     if (!L.pool) rt_fatal("memory: TOTK_APP_POOL is 0");
-    lazy_heap = cfg_bool("TOTK_LAZY_HEAP");
+    lazy_heap = lazy_heap_wanted(L.pool);
     if (lazy_heap) {
 #ifdef _WIN32
         const char *granule = cfg_value("TOTK_LAZY_HEAP_KIB");
