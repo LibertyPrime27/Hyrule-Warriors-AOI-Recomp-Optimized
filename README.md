@@ -41,7 +41,6 @@ Combat is now CPU-bound rather than stalled on the GPU.
 
 - **Shader pipelines build in the background**, from a pipeline key cache recorded on earlier runs. Draws whose pipeline is not ready yet are skipped instead of blocking the frame. This removes the emulator-style shader stutter and the long black stalls.
 - **Game files are verified once, not on every launch.** RomFS hash verification is saved in `romfs-verified.bin`, so later launches skip re-hashing unchanged game data. Scene loads are much shorter.
-- **A loading window with a progress bar** shows while compiled shaders load at startup, instead of a black screen. It closes on the game's first frame.
 
 ### DLC and update support
 
@@ -61,7 +60,7 @@ The 30 / 60 / 90 / 120 FPS settings are available, both in the compiler (**Allow
 >
 > Rendering more frames therefore runs the game faster.
 
-**For smooth motion at normal speed, play at 60 FPS and use frame generation**, for example [Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/) LSFG 2× for 120 FPS output. Fullscreen (F11) is borderless rather than exclusive, so capture-based frame generation works. Turn it on after the game window appears, not during the startup loading window.
+**For smooth motion at normal speed, play at 60 FPS and use frame generation**, for example [Lossless Scaling](https://store.steampowered.com/app/993090/Lossless_Scaling/) LSFG 2× for 120 FPS output. Fullscreen (F11) is borderless rather than exclusive, so capture-based frame generation works. Turn it on once the game window appears.
 
 ### Name and icon
 

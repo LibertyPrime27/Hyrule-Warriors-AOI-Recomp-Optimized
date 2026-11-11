@@ -274,7 +274,7 @@ def launch_interactive(args, identity):
     env = dict(os.environ)
     # Environment overrides take precedence over inherited ini/probe settings.
     options = {"HWAOI_GPU": "vulkan", "HWAOI_FULLSCREEN": "0", "HWAOI_WINDOW_SIZE": "1280x720",
-               "HWAOI_INPUT": args.input_mode, "HWAOI_RUMBLE": "0", "HWAOI_PROGRESS": "1", "HWAOI_SPLASH": "1",
+               "HWAOI_INPUT": args.input_mode, "HWAOI_RUMBLE": "0", "HWAOI_PROGRESS": "1",
                "HWAOI_EXEFS": str(args.exefs.resolve()),
                "HWAOI_PROFILE_DIR": str(local_output(args.profile_dir, "saves")),
                "HWAOI_GSV_LOCAL_FRAME_POLICY": "1", "HWAOI_NATIVE_INFLATE": "1",

@@ -365,7 +365,6 @@ void rt_frame_presented(const tex_t *t, const int crop[4], uint64_t n) {
     // Preserve bounded diagnostic snapshots even when a later initialization
     // failure prevents reaching the requested render-probe stopping present.
     series_shot(t, crop, n);
-    if (n == 1) splash_stop();   // the game window has its first picture: the loading window hands over
     // Interactive diagnostic runs need a timestamped heartbeat even after the
     // automatic capture range ends. Counter values are observations, not an
     // assertion of graphical correctness or playability.
@@ -461,12 +460,7 @@ static void prewarm_main(void *arg) {
     return;
 }
 
-// splash_win.c: the loading window from process start to the first present (HWAOI_SPLASH=1). No-ops elsewhere.
-__attribute__((weak)) void splash_start(void) {}
-__attribute__((weak)) void splash_stop(void) {}
-
 void rt_boot(void) {
-    splash_start();
     check_npdm();
     if (!rt_config()->shot) vk_pipeline_async_enable();   // a --shot image must not depend on build timing
     // Shaders and pipelines recorded in earlier runs are made ready while the modules load; the guest waits for them.

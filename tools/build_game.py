@@ -405,7 +405,7 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
                 lines.append(f'  rtflags = $rtflags -std=c++20 -I {cmd_path(RUNTIME / "third_party" / "eglantine")}')
         rt.append(o)
     if ICON and WIN and not make_lib:
-        # Icon group 1, which the window classes load (gfx_window_win.c, splash_win.c). The .rc lives in the build
+        # Icon group 1, which the game window class loads (gfx_window_win.c). The .rc lives in the build
         # folder because the icon is the user's own game artwork, never part of the source tree.
         rc = out / 'game_icon.rc'
         text = '1 ICON "' + Path(ICON).resolve().as_posix().replace('"', '') + '"\n'
