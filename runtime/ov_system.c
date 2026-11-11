@@ -21,6 +21,7 @@
 
 #include "cfg.h"
 #include "fs.h"
+#include "gfx.h"   // oe_push_message, OE_MSG_*
 #include "host.h"
 #include "ov.h"
 #include "platform/platform.h"
@@ -37,20 +38,31 @@ static void need(int ok, const char *what) {
 static const char *caller(Cpu *c, char *buf, int n) { return ldr_describe(c->x[30] - 4, buf, n); }
 
 // ==== nn::oe (services.c)
-// TOTK_OPERATION_MODE, read once: 1 handheld (OperationMode 0, PerformanceMode Normal 0), 0 docked (1, Boost 1).
+static volatile int32_t notify_resume, notify_operation, notify_performance;
+
+// TOTK_OPERATION_MODE, live (the Controls menu docks and undocks like a console): 1 handheld (OperationMode 0,
+// PerformanceMode Normal 0), 0 docked (1, Boost 1). A change while the game runs sends it OperationModeChanged and
+// PerformanceModeChanged, as docking does, when it asked for those notifications.
 int ov_handheld(void) {
     static volatile int32_t v = -1;
+    static volatile uint32_t seen = ~0u;
+    unsigned ver = cfg_version();
     int32_t h = v;
-    if (h < 0) {
-        const char *e = cfg_value("TOTK_OPERATION_MODE");
-        if (!strcmp(e, "docked")) h = 0;
-        else if (!strcmp(e, "handheld")) h = 1;
-        else rt_fatal("TOTK_OPERATION_MODE must be docked or handheld, not '%s'", e);
-        if (plat_cas32(&v, h, -1) == -1)
-            rt_log("oe: operation mode reported to the game: %s", h ? "handheld (performance normal)"
-                                                                  : "docked (performance boost)");
+    if (h >= 0 && __atomic_load_n(&seen, __ATOMIC_RELAXED) == ver) return (int)h;
+    const char *e = cfg_value("TOTK_OPERATION_MODE");
+    int32_t now;
+    if (!strcmp(e, "docked")) now = 0;
+    else if (!strcmp(e, "handheld")) now = 1;
+    else rt_fatal("TOTK_OPERATION_MODE must be docked or handheld, not '%s'", e);
+    __atomic_store_n(&seen, ver, __ATOMIC_RELAXED);
+    int32_t was = plat_xchg32(&v, now);
+    if (was == now) return (int)now;
+    rt_log("oe: operation mode reported to the game: %s", now ? "handheld (performance normal)" : "docked (performance boost)");
+    if (was >= 0) {   // a live change, not the first read
+        if (notify_operation) oe_push_message(OE_MSG_OPERATION_MODE_CHANGED);
+        if (notify_performance) oe_push_message(OE_MSG_PERFORMANCE_MODE_CHANGED);
     }
-    return (int)h;
+    return (int)now;
 }
 
 // The Switch language for a BCP 47 tag; en-US for a language the game does not ship.
@@ -173,7 +185,6 @@ void oe_set_focus(int in_focus) {
 }
 static void ov_focus_state(Cpu *c) { ret_x(c, (uint64_t)focus_state); }
 
-static volatile int32_t notify_resume, notify_operation, notify_performance;
 static void ov_resume_enabled(Cpu *c) { plat_xchg32(&notify_resume, (int32_t)(arg_x(c, 0) & 0xff)); }
 static void ov_operation_enabled(Cpu *c) { plat_xchg32(&notify_operation, (int32_t)(arg_x(c, 0) & 0xff)); }
 static void ov_performance_enabled(Cpu *c) { plat_xchg32(&notify_performance, (int32_t)(arg_x(c, 0) & 0xff)); }

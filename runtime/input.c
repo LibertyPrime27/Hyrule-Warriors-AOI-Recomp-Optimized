@@ -27,16 +27,28 @@ enum { STICK_MAX = 32767, STICK_DIR = 16384, TRIGGER_ON = 16384, RESCAN_MS = 100
 
 static PlatMutex lock = PLAT_MUTEX_INIT;
 static int state;                    // 0 not started, 1 running, -1 disabled or SDL failed
-static SDL_Gamepad *pad;
 static uint64_t next_scan;
-static int pad_rumble;               // the open gamepad has rumble motors
-static volatile int32_t pad_labels[4];  // ... and the labels of its south, east, west, north buttons (PAD_LABEL_*), any thread
-static int pad_east_a;               // ... and labels its east face button A (Nintendo layout under TOTK_PAD_LAYOUT=auto)
-static int pad_layout = -1;          // PAD_LAYOUT_* in effect for the open gamepad, -1 to pick again; live (cfg_version)
-static unsigned pad_layout_seen;
-static volatile int32_t pad_layout_shown = -1;   // pad_layout for the menu (any thread), -1 without a gamepad
-static SDL_JoystickID sensor_pad;    // the gamepad whose sensors the motion thread set up, 0 none
-static int sensor_ok;                // ... and it has both sensors, enabled
+
+// Every connected gamepad is open, in connection order. Each belongs to at most one player (assign below): co-op runs
+// player 1 and player 2 from separate devices, so one never moves the other. All fields under `lock`.
+enum { MAX_PADS = 8 };
+typedef struct {
+    SDL_Gamepad *g;
+    SDL_JoystickID id;
+    char name[64], guid[33];
+    int rumble;                      // has rumble motors
+    int east_a;                      // labels its east face button A (Nintendo layout under TOTK_PAD_LAYOUT=auto)
+    int layout;                      // PAD_LAYOUT_* in effect, -1 to pick again; live (cfg_version)
+    unsigned layout_seen;
+    int32_t labels[4];               // labels of its south, east, west, north buttons (PAD_LABEL_*)
+    int sensor_set, sensor_ok;       // the motion thread set its sensors up; it has both, enabled
+} Pad;
+static Pad pads[MAX_PADS];
+static int npads;
+static unsigned pads_version;        // bumped whenever a gamepad opens or closes
+
+static volatile int32_t pad_labels[4];           // player 1's gamepad's face labels, for the menu (any thread)
+static volatile int32_t pad_layout_shown = -1;   // player 1's gamepad's layout for the menu (any thread), -1 without one
 static int motion_thread;            // 0 not started, 1 running, -1 off (TOTK_MOTION=0, no SDL)
 
 // SDL buttons of the gamepad inputs (input_map.h PAD_*), by position; PAD_ZL and PAD_ZR are the triggers (axes).
@@ -277,62 +289,154 @@ static float stick_dead_get(void) {
 }
 
 // One gamepad stick through the dead zone; SDL's Y grows downwards, the Switch's upwards.
-static void stick(SDL_GamepadAxis ax, SDL_GamepadAxis ay, float dead, int32_t out[2]) {
-    input_pad_stick(SDL_GetGamepadAxis(pad, ax), -(int32_t)SDL_GetGamepadAxis(pad, ay), dead, out);
+static void stick(SDL_Gamepad *g, SDL_GamepadAxis ax, SDL_GamepadAxis ay, float dead, int32_t out[2]) {
+    input_pad_stick(SDL_GetGamepadAxis(g, ax), -(int32_t)SDL_GetGamepadAxis(g, ay), dead, out);
 }
 
-// Open the first gamepad when none is open or the open one went away; logs once per change.
+static int32_t label_of(SDL_GamepadButtonLabel lb) {
+    return lb == SDL_GAMEPAD_BUTTON_LABEL_A          ? PAD_LABEL_A
+           : lb == SDL_GAMEPAD_BUTTON_LABEL_B        ? PAD_LABEL_B
+           : lb == SDL_GAMEPAD_BUTTON_LABEL_X        ? PAD_LABEL_X
+           : lb == SDL_GAMEPAD_BUTTON_LABEL_Y        ? PAD_LABEL_Y
+           : lb == SDL_GAMEPAD_BUTTON_LABEL_CROSS    ? PAD_LABEL_CROSS
+           : lb == SDL_GAMEPAD_BUTTON_LABEL_CIRCLE   ? PAD_LABEL_CIRCLE
+           : lb == SDL_GAMEPAD_BUTTON_LABEL_SQUARE   ? PAD_LABEL_SQUARE
+           : lb == SDL_GAMEPAD_BUTTON_LABEL_TRIANGLE ? PAD_LABEL_TRIANGLE
+                                                     : PAD_LABEL_NONE;
+}
+
+// Under lock: close the gamepads that went away and open every new one (any brand SDL knows: Xbox, PlayStation, Switch,
+// generic); logs each change.
 static void scan_pads(void) {
-    if (pad && SDL_GamepadConnected(pad)) return;
-    if (pad) {
-        SDL_CloseGamepad(pad); pad = NULL; sensor_pad = 0; sensor_ok = 0;
-        plat_xchg32(&pad_layout_shown, -1);
-        for (int i = 0; i < 4; i++) plat_xchg32(&pad_labels[i], PAD_LABEL_NONE);
-        rt_log("input: gamepad disconnected");
+    for (int i = npads - 1; i >= 0; i--) {
+        if (SDL_GamepadConnected(pads[i].g)) continue;
+        rt_log("input: gamepad \"%s\" disconnected", pads[i].name);
+        SDL_CloseGamepad(pads[i].g);
+        memmove(&pads[i], &pads[i + 1], (size_t)(npads - i - 1) * sizeof *pads);
+        npads--;
+        pads_version++;
     }
     int n = 0;
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
-    for (int i = 0; ids && i < n && !pad; i++) pad = SDL_OpenGamepad(ids[i]);
-    SDL_free(ids);
-    if (!pad) return;
-    pad_rumble = SDL_GetBooleanProperty(SDL_GetGamepadProperties(pad), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
-    pad_east_a = SDL_GetGamepadButtonLabel(pad, SDL_GAMEPAD_BUTTON_EAST) == SDL_GAMEPAD_BUTTON_LABEL_A;
-    for (int i = 0; i < 4; i++) {
-        SDL_GamepadButtonLabel lb = SDL_GetGamepadButtonLabel(pad, pad_sdl[PAD_SOUTH + i]);
-        plat_xchg32(&pad_labels[i], lb == SDL_GAMEPAD_BUTTON_LABEL_A          ? PAD_LABEL_A
-                                            : lb == SDL_GAMEPAD_BUTTON_LABEL_B        ? PAD_LABEL_B
-                                            : lb == SDL_GAMEPAD_BUTTON_LABEL_X        ? PAD_LABEL_X
-                                            : lb == SDL_GAMEPAD_BUTTON_LABEL_Y        ? PAD_LABEL_Y
-                                            : lb == SDL_GAMEPAD_BUTTON_LABEL_CROSS    ? PAD_LABEL_CROSS
-                                            : lb == SDL_GAMEPAD_BUTTON_LABEL_CIRCLE   ? PAD_LABEL_CIRCLE
-                                            : lb == SDL_GAMEPAD_BUTTON_LABEL_SQUARE   ? PAD_LABEL_SQUARE
-                                            : lb == SDL_GAMEPAD_BUTTON_LABEL_TRIANGLE ? PAD_LABEL_TRIANGLE
-                                                                                      : PAD_LABEL_NONE);
+    for (int i = 0; ids && i < n && npads < MAX_PADS; i++) {
+        int open = 0;
+        for (int k = 0; k < npads; k++) open |= pads[k].id == ids[i];
+        SDL_Gamepad *g = open ? NULL : SDL_OpenGamepad(ids[i]);
+        if (!g) continue;
+        Pad *p = &pads[npads++];
+        memset(p, 0, sizeof *p);
+        p->g = g, p->id = ids[i], p->layout = -1;
+        const char *name = SDL_GetGamepadName(g);
+        snprintf(p->name, sizeof p->name, "%s", name && *name ? name : "Gamepad");
+        SDL_GUIDToString(SDL_GetGamepadGUIDForID(ids[i]), p->guid, sizeof p->guid);
+        p->rumble = SDL_GetBooleanProperty(SDL_GetGamepadProperties(g), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
+        p->east_a = SDL_GetGamepadButtonLabel(g, SDL_GAMEPAD_BUTTON_EAST) == SDL_GAMEPAD_BUTTON_LABEL_A;
+        for (int k = 0; k < 4; k++) p->labels[k] = label_of(SDL_GetGamepadButtonLabel(g, pad_sdl[PAD_SOUTH + k]));
+        pads_version++;
+        int motion = SDL_GamepadHasSensor(g, SDL_SENSOR_GYRO) && SDL_GamepadHasSensor(g, SDL_SENSOR_ACCEL);
+        rt_log("input: gamepad \"%s\" (%s, %s, east button %s)", p->name, p->rumble ? "rumble" : "no rumble",
+               motion ? "gyro and accelerometer" : "no motion sensors", p->east_a ? "labelled A" : "not labelled A");
     }
-    pad_layout = -1;
-    int motion = SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO) && SDL_GamepadHasSensor(pad, SDL_SENSOR_ACCEL);
-    rt_log("input: gamepad \"%s\" (%s, %s, east button %s)", SDL_GetGamepadName(pad), pad_rumble ? "rumble" : "no rumble",
-           motion ? "gyro and accelerometer" : "no motion sensors", pad_east_a ? "labelled A" : "not labelled A");
+    SDL_free(ids);
 }
 
-// Under lock: the layout of the open gamepad, picked again when a setting or the gamepad changed; logs each change.
-static int pad_layout_get(void) {
+// Under lock: look for gamepads plugged in or out (once a second) and read the open ones' current reports.
+static void pads_tick(void) {
+    uint64_t now_ms = plat_now_ns() / 1000000u;
+    if (now_ms >= next_scan) {
+        next_scan = now_ms + RESCAN_MS;
+        scan_pads();
+    }
+    SDL_UpdateGamepads();
+}
+
+// Under lock: a gamepad's layout, picked again when a setting or the gamepad changed; logs each change.
+static int pad_layout_get(Pad *p) {
     unsigned ver = cfg_version();
-    if (pad_layout >= 0 && ver == pad_layout_seen) return pad_layout;
-    pad_layout_seen = ver;
-    int was = pad_layout;
+    if (p->layout >= 0 && ver == p->layout_seen) return p->layout;
+    p->layout_seen = ver;
+    int was = p->layout;
     const char *set = cfg_value("TOTK_PAD_LAYOUT");
-    pad_layout = input_pad_layout_pick(set, pad_east_a);
-    if (pad_layout != was)
-        rt_log("input: gamepad layout %s (pad_layout = %s)", pad_layout == PAD_LAYOUT_XBOX ? "xbox" : "nintendo", set);
-    plat_xchg32(&pad_layout_shown, pad_layout);
-    return pad_layout;
+    p->layout = input_pad_layout_pick(set, p->east_a);
+    if (p->layout != was)
+        rt_log("input: \"%s\" layout %s (pad_layout = %s)", p->name, p->layout == PAD_LAYOUT_XBOX ? "xbox" : "nintendo", set);
+    return p->layout;
+}
+
+// ---- Players (TOTK_PLAYER<n>_DEVICE, live): which devices feed which Switch controller
+// "auto": the first gamepad no other player has; player 1 also gets the keyboard and mouse unless a player chose them.
+// "keyboard": the keyboard and mouse. "pad:<SDL GUID>:<k>": the k-th connected gamepad of that model (input_device_choices
+// names them). "none" (player 2): not connected. A device belongs to one player only.
+static int pad_owner[MAX_PADS];      // the player each open gamepad feeds, -1 none
+static int kb_owner;                 // the player the keyboard and mouse feed, -1 none
+static unsigned assign_cfg_seen = ~0u, assign_pads_seen = ~0u;
+
+static void pad_value(int i, char *out, size_t n) {
+    int k = 0;
+    for (int j = 0; j < i; j++) k += !strcmp(pads[j].guid, pads[i].guid);
+    snprintf(out, n, "pad:%s:%d", pads[i].guid, k);
+}
+
+static const char *player_device(int p) {
+    char key[32];
+    snprintf(key, sizeof key, "TOTK_PLAYER%d_DEVICE", p + 1);
+    const char *v = cfg_value(key);
+    return v && *v ? v : "auto";
+}
+
+// Under lock: pad_owner and kb_owner for the current settings and gamepads; logs each change.
+static void assign(void) {
+    unsigned v = cfg_version();
+    if (v == assign_cfg_seen && pads_version == assign_pads_seen) return;
+    assign_cfg_seen = v, assign_pads_seen = pads_version;
+    const char *dev[INPUT_PLAYERS];
+    for (int p = 0; p < INPUT_PLAYERS; p++) dev[p] = player_device(p);
+    for (int i = 0; i < MAX_PADS; i++) pad_owner[i] = -1;
+    kb_owner = -1;
+    for (int p = 0; p < INPUT_PLAYERS; p++) {
+        if (!strcmp(dev[p], "keyboard") && kb_owner < 0) kb_owner = p;
+        if (strncmp(dev[p], "pad:", 4)) continue;
+        for (int i = 0; i < npads; i++) {
+            char val[64];
+            pad_value(i, val, sizeof val);
+            if (pad_owner[i] < 0 && !strcmp(val, dev[p])) { pad_owner[i] = p; break; }
+        }
+    }
+    for (int p = 0; p < INPUT_PLAYERS; p++) {
+        if (strcmp(dev[p], "auto")) continue;
+        for (int i = 0; i < npads; i++)
+            if (pad_owner[i] < 0) { pad_owner[i] = p; break; }
+    }
+    if (kb_owner < 0 && strcmp(dev[0], "none")) kb_owner = 0;
+    char summary[256];
+    size_t len = 0;
+    for (int p = 0; p < INPUT_PLAYERS; p++) {
+        len += (size_t)snprintf(summary + len, sizeof summary - len, "%splayer %d:", p ? "; " : "", p + 1);
+        int any = 0;
+        if (kb_owner == p) len += (size_t)snprintf(summary + len, sizeof summary - len, " keyboard and mouse"), any = 1;
+        for (int i = 0; i < npads && len < sizeof summary; i++)
+            if (pad_owner[i] == p)
+                len += (size_t)snprintf(summary + len, sizeof summary - len, "%s \"%s\"", any ? " +" : "", pads[i].name), any = 1;
+        if (!any && len < sizeof summary) len += (size_t)snprintf(summary + len, sizeof summary - len, " nothing");
+        if (len >= sizeof summary) len = sizeof summary - 1;
+    }
+    static char last[256];
+    if (strcmp(summary, last)) {
+        snprintf(last, sizeof last, "%s", summary);
+        rt_log("input: %s", summary);
+    }
+    // The menu's labels and layout follow player 1's gamepad.
+    int first = -1;
+    for (int i = 0; i < npads && first < 0; i++)
+        if (pad_owner[i] == 0) first = i;
+    plat_xchg32(&pad_layout_shown, first < 0 ? -1 : pad_layout_get(&pads[first]));
+    for (int k = 0; k < 4; k++) plat_xchg32(&pad_labels[k], first < 0 ? PAD_LABEL_NONE : pads[first].labels[k]);
 }
 
 // The TOTK_BIND_* values last applied, one per line; the tables are built again when one changes (the menu's remapping rows write
 // them while the game runs). Under lock.
 static unsigned binds_seen = ~0u;
-static char binds_applied[4096];
+static char binds_applied[8192];
 
 static void binds_refresh(void) {
     unsigned v = cfg_version();
@@ -340,12 +444,13 @@ static void binds_refresh(void) {
     binds_seen = v;
     char now[sizeof binds_applied];
     size_t len = 0;
-    for (int a = 0; a < ACTION_COUNT; a++) {
-        char var[32];
-        snprintf(var, sizeof var, "TOTK_BIND_%s", input_action_name(a));
-        const char *s = cfg_get(var);
-        len += (size_t)snprintf(now + len, len < sizeof now ? sizeof now - len : 0, "%s\n", s ? s : "");
-    }
+    for (int p = 0; p < INPUT_PLAYERS; p++)
+        for (int a = 0; a < ACTION_COUNT; a++) {
+            char var[40];
+            input_bind_var(p, a, var, sizeof var);
+            const char *s = cfg_get(var);
+            len += (size_t)snprintf(now + len, len < sizeof now ? sizeof now - len : 0, "%s\n", s ? s : "");
+        }
     if (!strcmp(now, binds_applied)) return;
     memcpy(binds_applied, now, sizeof now);
     input_map_configure();
@@ -391,7 +496,7 @@ static void start(void) {
     if (state == 1) test_pad_attach();
     if (state == 1) {
         scan_pads();
-        if (!pad) rt_log("input: no gamepad (keyboard only until one is connected)");
+        if (!npads) rt_log("input: no gamepad (keyboard only until one is connected)");
     }
     if (state == -1) state = 2;   // keyboard only
 }
@@ -408,27 +513,31 @@ static void pick(int32_t *x, int32_t *y, int32_t kx, int32_t ky) {
     if (b > a) { *x = kx; *y = ky; }
 }
 
-// Under lock, state 1: the open gamepad's inputs by position (pd[PAD_*] != 0 held); 0 without a connected gamepad.
-static int pad_physical(uint8_t pd[PAD_COUNT]) {
-    if ((!pad || !SDL_GamepadConnected(pad)) && plat_now_ns() / 1000000u >= next_scan) { next_scan = plat_now_ns() / 1000000u + RESCAN_MS; scan_pads(); }
-    SDL_UpdateGamepads();
-    if (!pad || !SDL_GamepadConnected(pad)) return 0;
-    for (int p = PAD_SOUTH; p < PAD_ZL; p++) pd[p] = SDL_GetGamepadButton(pad, pad_sdl[p]);
-    pd[PAD_ZL] = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > TRIGGER_ON;
-    pd[PAD_ZR] = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > TRIGGER_ON;
-    for (int p = PAD_ZR + 1; p < PAD_COUNT; p++) pd[p] = SDL_GetGamepadButton(pad, pad_sdl[p]);   // false without paddles
+// Under lock, state 1, after pads_tick: one gamepad's inputs by position (pd[PAD_*] != 0 held), ORed into pd; 0 when it
+// is gone.
+static int pad_physical(const Pad *pp, uint8_t pd[PAD_COUNT]) {
+    SDL_Gamepad *g = pp->g;
+    if (!SDL_GamepadConnected(g)) return 0;
+    for (int p = PAD_SOUTH; p < PAD_ZL; p++) pd[p] |= SDL_GetGamepadButton(g, pad_sdl[p]);
+    pd[PAD_ZL] |= SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > TRIGGER_ON;
+    pd[PAD_ZR] |= SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > TRIGGER_ON;
+    for (int p = PAD_ZR + 1; p < PAD_COUNT; p++) pd[p] |= SDL_GetGamepadButton(g, pad_sdl[p]);   // false without paddles
     return 1;
 }
 
-// Under lock, state 1: the open gamepad's buttons (Switch bits after TOTK_PAD_LAYOUT and the TOTK_BIND_* lines) and
-// sticks; 0 without a connected gamepad.
-static int pad_read(uint64_t *b, int32_t sl[2], int32_t sr[2]) {
+// Under lock, state 1, after pads_tick: one gamepad's buttons (Switch bits after TOTK_PAD_LAYOUT and the TOTK_BIND_*
+// lines) ORed into *b, and its sticks where they are deflected further than sl / sr; 0 when it is gone.
+static void pick(int32_t *x, int32_t *y, int32_t kx, int32_t ky);
+static int pad_read(Pad *pp, const InputMap *map, uint64_t *b, int32_t sl[2], int32_t sr[2]) {
     uint8_t pd[PAD_COUNT] = {0};
-    if (!pad_physical(pd)) return 0;
-    *b |= input_map_pad_buttons(pd, pad_layout_get());
+    if (!pad_physical(pp, pd)) return 0;
+    *b |= input_map_pad_buttons_m(map, pd, pad_layout_get(pp));
     float dead = stick_dead_get();
-    stick(SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, dead, sl);
-    stick(SDL_GAMEPAD_AXIS_RIGHTX, SDL_GAMEPAD_AXIS_RIGHTY, dead, sr);
+    int32_t l[2], r[2];
+    stick(pp->g, SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, dead, l);
+    stick(pp->g, SDL_GAMEPAD_AXIS_RIGHTX, SDL_GAMEPAD_AXIS_RIGHTY, dead, r);
+    pick(&sl[0], &sl[1], l[0], l[1]);
+    pick(&sr[0], &sr[1], r[0], r[1]);
     return 1;
 }
 
@@ -486,15 +595,23 @@ static void feed_apply(uint64_t *buttons, int32_t left[2], int32_t right[2]) {
     input_feed_merge(&feed, now, buttons, left, right);
 }
 
-static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
+// Player p's controller: the gamepads and, when it owns them, the keyboard and mouse that feed it (assign). Returns 1
+// when the player has a device (player 1 always counts as connected). Script, feed and recording belong to player 1.
+static int poll_player(int p, uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
     uint64_t b = 0;
     int32_t sl[2] = {0, 0}, sr[2] = {0, 0};
+    int connected = p == 0;
     plat_mutex_lock(&lock);
     if (!state) start();
     if (state > 0) {
         binds_refresh();
-        if (state == 1) pad_read(&b, sl, sr);
-        if (ikb_foreground()) {
+        if (state == 1) pads_tick();
+        assign();
+        if (state == 1)
+            for (int i = 0; i < npads; i++)
+                if (pad_owner[i] == p) connected |= 1, pad_read(&pads[i], input_map_player(p), &b, sl, sr);
+        if (kb_owner == p) connected = 1;
+        if (kb_owner == p && ikb_foreground()) {
             uint8_t down[KEY_COUNT] = {0};
             // Mouse buttons count only while the cursor is captured, and a button already held when the capture began
             // (the click that refocused the window) is ignored until it is released.
@@ -509,25 +626,28 @@ static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx
                 if (!cap || mouse_ignore[k]) down[k] = 0;
             }
             was_captured = cap;
-            b |= input_map_buttons(down);
+            const InputMap *map = input_map_player(p);
+            b |= input_map_buttons_m(map, down);
             int32_t k[2];
-            input_map_stick(down, 0, k);
+            input_map_stick_m(map, down, 0, k);
             pick(&sl[0], &sl[1], k[0], k[1]);
-            input_map_stick(down, 1, k);
+            input_map_stick_m(map, down, 1, k);
             pick(&sr[0], &sr[1], k[0], k[1]);
             mouse_camera(k);
             pick(&sr[0], &sr[1], k[0], k[1]);
         }
     }
-    script_apply(&b, sl, sr);
-    feed_apply(&b, sl, sr);
-    rec_apply(b, sl, sr);
-    // Minus and Plus held together (gamepad or keys) open or close the menu and never reach the game
-    static int combo_held;
+    if (p == 0) {
+        script_apply(&b, sl, sr);
+        feed_apply(&b, sl, sr);
+        rec_apply(b, sl, sr);
+    }
+    // Minus and Plus held together (gamepad or keys) open or close the menu and never reach the game; either player can
+    static int combo_held[INPUT_PLAYERS];
     int32_t st[4] = {sl[0], sl[1], sr[0], sr[1]};
-    int toggle = input_menu_gate(&combo_held, menu_is_open(), &b, st);
-    static int overlay_held;   // L3+R3 step the performance overlay (F10)
-    int overlay = input_overlay_gate(&overlay_held, &b);
+    int toggle = input_menu_gate(&combo_held[p], menu_is_open(), &b, st);
+    static int overlay_held[INPUT_PLAYERS];   // L3+R3 step the performance overlay (F10)
+    int overlay = input_overlay_gate(&overlay_held[p], &b);
     sl[0] = st[0], sl[1] = st[1], sr[0] = st[2], sr[1] = st[3];
     plat_mutex_unlock(&lock);
     if (toggle) menu_toggle();
@@ -535,6 +655,7 @@ static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx
     stick_bits(&b, sl[0], sl[1], B_SL_LEFT);
     stick_bits(&b, sr[0], sr[1], B_SR_LEFT);
     *buttons = b; *lx = sl[0]; *ly = sl[1]; *rx = sr[0]; *ry = sr[1];
+    return connected;
 }
 
 // Text entry (swkbd_*.c): while it is open the game reads no input, as behind the keyboard applet; after it closes
@@ -567,24 +688,64 @@ static int blocked(volatile int32_t *flag, uint64_t buttons) {
     return k && !(k == 2 && !buttons && plat_cas32(flag, 0, 2) == 2);
 }
 
+int input_poll_player(int p, uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
+    if (p < 0 || p >= INPUT_PLAYERS) { *buttons = 0; *lx = *ly = *rx = *ry = 0; return 0; }
+    int connected = poll_player(p, buttons, lx, ly, rx, ry);
+    // Player 1's releases end a text entry or menu block (blocked); the other players stay quiet until then.
+    int quiet = p == 0 ? blocked(&g_block, *buttons) | blocked(&g_menu, *buttons) : g_block != 0 || g_menu != 0;
+    if (quiet) { *buttons = 0; *lx = *ly = *rx = *ry = 0; }
+    return connected;
+}
+
 void input_poll(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
-    poll_merged(buttons, lx, ly, rx, ry);
-    int text = blocked(&g_block, *buttons), menu = blocked(&g_menu, *buttons);
-    if (!text && !menu) return;
-    *buttons = 0; *lx = *ly = *rx = *ry = 0;
+    input_poll_player(0, buttons, lx, ly, rx, ry);
 }
 
 void input_poll_ui(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
-    poll_merged(buttons, lx, ly, rx, ry);
+    poll_player(0, buttons, lx, ly, rx, ry);
 }
 
+int input_player_connected(int p) {
+    if (p == 0) return 1;
+    if (p < 0 || p >= INPUT_PLAYERS) return 0;
+    plat_mutex_lock(&lock);
+    if (!state) start();
+    if (state == 1) pads_tick();
+    if (state > 0) assign();
+    int connected = kb_owner == p;
+    for (int i = 0; i < npads && state == 1; i++) connected |= pad_owner[i] == p;
+    plat_mutex_unlock(&lock);
+    return connected;
+}
+
+int input_device_choices(InputDeviceChoice *out, int max) {
+    int n = 0;
+    plat_mutex_lock(&lock);
+    if (!state) start();
+    if (state == 1) pads_tick();
+    for (int i = 0; i < npads && n < max; i++, n++) {
+        pad_value(i, out[n].value, sizeof out[n].value);
+        int same = 0, k = 0;
+        for (int j = 0; j < npads; j++) same += !strcmp(pads[j].guid, pads[i].guid), k += j < i && !strcmp(pads[j].guid, pads[i].guid);
+        if (same > 1) snprintf(out[n].name, sizeof out[n].name, "%s #%d", pads[i].name, k + 1);
+        else snprintf(out[n].name, sizeof out[n].name, "%s", pads[i].name);
+    }
+    plat_mutex_unlock(&lock);
+    return n;
+}
+
+// The menu: any gamepad navigates it.
 int input_pad_read(uint64_t *buttons, int32_t *lx, int32_t *ly) {
     uint64_t b = 0;
     int32_t sl[2] = {0, 0}, sr[2] = {0, 0};
+    int ok = 0;
     plat_mutex_lock(&lock);
     if (!state) start();
     if (state > 0) binds_refresh();
-    int ok = state == 1 && pad_read(&b, sl, sr);
+    if (state == 1) {
+        pads_tick();
+        for (int i = 0; i < npads; i++) ok |= pad_read(&pads[i], &input_map, &b, sl, sr);
+    }
     plat_mutex_unlock(&lock);
     *buttons = b;
     *lx = sl[0];
@@ -607,13 +768,15 @@ int input_pad_label(int pad_id) {
     return (int)plat_cas32(&pad_labels[pad_id - PAD_SOUTH], 0, 0);
 }
 
-void input_map_snapshot(InputMap *m) {
+void input_map_snapshot_player(int player, InputMap *m) {
     plat_mutex_lock(&lock);
     if (!state) start();
     if (state > 0) binds_refresh();
-    *m = input_map;
+    *m = *input_map_player(player);
     plat_mutex_unlock(&lock);
 }
+
+void input_map_snapshot(InputMap *m) { input_map_snapshot_player(0, m); }
 
 int input_capture(int reset, int *id) {
     static uint8_t prev_k[KEY_COUNT], prev_p[PAD_COUNT];
@@ -624,7 +787,10 @@ int input_capture(int reset, int *id) {
     int esc = fg && ikb_escape();
     plat_mutex_lock(&lock);
     if (!state) start();
-    if (state == 1) pad_physical(p);
+    if (state == 1) {
+        pads_tick();
+        for (int i = 0; i < npads; i++) pad_physical(&pads[i], p);   // any gamepad can be the one being bound
+    }
     plat_mutex_unlock(&lock);
     int got = INPUT_CAPTURE_NONE;
     if (!reset) {
@@ -644,19 +810,23 @@ int input_rumble_triggers_enabled(void) {
     return cfg_bool("TOTK_RUMBLE_TRIGGERS");
 }
 
-int input_rumble(uint16_t low, uint16_t high, uint32_t ms) {
+int input_rumble_player(int player, uint16_t low, uint16_t high, uint32_t ms) {
     int ok = 0;
     static int triggers = -1;
     static unsigned seen;
     if (triggers < 0 || seen != cfg_version()) seen = cfg_version(), triggers = input_rumble_triggers_enabled();
     plat_mutex_lock(&lock);
-    if (state == 1 && pad && pad_rumble) {
-        ok = SDL_RumbleGamepad(pad, low, high, ms);
-        if (triggers) SDL_RumbleGamepadTriggers(pad, high, high, ms);   // unsupported pads return false: ignored
+    if (state == 1) assign();
+    for (int i = 0; state == 1 && i < npads; i++) {
+        if (pad_owner[i] != player || !pads[i].rumble) continue;
+        ok |= SDL_RumbleGamepad(pads[i].g, low, high, ms);
+        if (triggers) SDL_RumbleGamepadTriggers(pads[i].g, high, high, ms);   // unsupported pads return false: ignored
     }
     plat_mutex_unlock(&lock);
     return ok;
 }
+
+int input_rumble(uint16_t low, uint16_t high, uint32_t ms) { return input_rumble_player(0, low, high, ms); }
 
 // SDL gamepad sensor axes (SDL_sensor.h, a gamepad held in front of you): x to the right, y up out of the face (lying
 // flat face up, +y points at the ceiling), z toward the player (out of the bottom edge). The accelerometer reads the
@@ -674,22 +844,32 @@ void input_motion_axes(const float a[3], const float g[3], double acc[3], double
     gyro[2] = g[1];
 }
 
-// Under lock: (re)enable the sensors when the open gamepad changed; 1 if it has both and they are on.
-static int sensors_ready(void) {
-    SDL_JoystickID id = SDL_GetGamepadID(pad);
-    if (id == sensor_pad) return sensor_ok;
-    sensor_pad = id;
+// Under lock: enable a gamepad's sensors the first time; 1 if it has both and they are on.
+static int sensors_ready(Pad *pp) {
+    if (pp->sensor_set) return pp->sensor_ok;
+    pp->sensor_set = 1;
     // Nothing drains the SDL event queue: no event per sample (the data still updates, SDL_SendJoystickSensor)
     SDL_SetEventEnabled(SDL_EVENT_GAMEPAD_SENSOR_UPDATE, false);
-    sensor_ok =SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO) && SDL_GamepadHasSensor(pad, SDL_SENSOR_ACCEL) &&
-                SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_GYRO, true) &&
-                SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_ACCEL, true);
-    if (sensor_ok) rt_log("input: motion sensors on (gyro %.0f Hz, accelerometer %.0f Hz)",
-                          (double)SDL_GetGamepadSensorDataRate(pad, SDL_SENSOR_GYRO),
-                          (double)SDL_GetGamepadSensorDataRate(pad, SDL_SENSOR_ACCEL));
-    else rt_log("input: \"%s\" has no gyro and accelerometer: the six-axis sensor reads a controller at rest",
-                SDL_GetGamepadName(pad));
-    return sensor_ok;
+    SDL_Gamepad *g = pp->g;
+    pp->sensor_ok = SDL_GamepadHasSensor(g, SDL_SENSOR_GYRO) && SDL_GamepadHasSensor(g, SDL_SENSOR_ACCEL) &&
+                    SDL_SetGamepadSensorEnabled(g, SDL_SENSOR_GYRO, true) &&
+                    SDL_SetGamepadSensorEnabled(g, SDL_SENSOR_ACCEL, true);
+    if (pp->sensor_ok) rt_log("input: \"%s\" motion sensors on (gyro %.0f Hz, accelerometer %.0f Hz)", pp->name,
+                              (double)SDL_GetGamepadSensorDataRate(g, SDL_SENSOR_GYRO),
+                              (double)SDL_GetGamepadSensorDataRate(g, SDL_SENSOR_ACCEL));
+    else rt_log("input: \"%s\" has no gyro and accelerometer: its six-axis sensor reads a controller at rest", pp->name);
+    return pp->sensor_ok;
+}
+
+// Each player's six-axis sensor: player 1's is motion_global() (the fusion ov_input.c always read).
+MotionFusion *input_motion_player(int p) {
+    static MotionFusion *others[INPUT_PLAYERS];
+    if (p <= 0 || p >= INPUT_PLAYERS) return motion_global();
+    MotionFusion *m = __atomic_load_n(&others[p], __ATOMIC_ACQUIRE);
+    if (m) return m;
+    MotionFusion *fresh = motion_new(), *expected = NULL;
+    if (!__atomic_compare_exchange_n(&others[p], &expected, fresh, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return expected;
+    return fresh;
 }
 
 int input_motion_enabled(void) {
@@ -710,19 +890,28 @@ static void motion_main(void *arg) {
     (void)arg;
     for (;;) {
         plat_wait_ns(4000000);
-        float a[3], g[3];
-        int have = 0;
+        float a[INPUT_PLAYERS][3], g[INPUT_PLAYERS][3];
+        int have[INPUT_PLAYERS] = {0};
         plat_mutex_lock(&lock);
-        if (pad && SDL_GamepadConnected(pad)) {
+        if (npads) {
             SDL_UpdateGamepads();
-            have = sensors_ready() && SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, a, 3) &&
-                   SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, g, 3);
+            assign();
+            // each player's sensor follows the first of its gamepads that has one
+            for (int i = 0; i < npads; i++) {
+                int p = pad_owner[i];
+                if (p < 0 || have[p] || !SDL_GamepadConnected(pads[i].g)) continue;
+                have[p] = sensors_ready(&pads[i]) && SDL_GetGamepadSensorData(pads[i].g, SDL_SENSOR_ACCEL, a[p], 3) &&
+                          SDL_GetGamepadSensorData(pads[i].g, SDL_SENSOR_GYRO, g[p], 3);
+            }
         }
         plat_mutex_unlock(&lock);
-        if (!have || !input_motion_enabled()) continue;
-        double acc[3], gyro[3];
-        input_motion_axes(a, g, acc, gyro);
-        motion_feed(motion_global(), acc, gyro, kern_now_ns());
+        if (!input_motion_enabled()) continue;
+        for (int p = 0; p < INPUT_PLAYERS; p++) {
+            if (!have[p]) continue;
+            double acc[3], gyro[3];
+            input_motion_axes(a[p], g[p], acc, gyro);
+            motion_feed(input_motion_player(p), acc, gyro, kern_now_ns());
+        }
     }
 }
 

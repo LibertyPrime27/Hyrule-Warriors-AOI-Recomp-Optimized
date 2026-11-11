@@ -149,6 +149,27 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_STICK_DEADZONE_DESC] = "How far a gamepad stick moves before the game sees it. Raise it if the character or the camera moves on its own.",
     [UI_MENU_MOUSE_SENS] = "Mouse camera sensitivity",
     [UI_MENU_MOUSE_SENS_DESC] = "How fast the mouse turns the camera.",
+    [UI_MENU_PLAYERS] = "Players and console",
+    [UI_BINDS_PLAYER] = "Bindings for",
+    [UI_BINDS_PLAYER_DESC] = "Whose buttons the rows below change. Each player has their own bindings, for their keyboard "
+                             "and their gamepad; select this row to switch between player 1 and player 2.",
+    [UI_BINDS_PLAYER_N] = "Player %d",
+    [UI_MENU_CONSOLE_MODE] = "Console mode",
+    [UI_MENU_CONSOLE_MODE_DESC] = "Docked or handheld, as if the console were in or out of its dock. Switching while playing "
+                                  "tells the game the console was docked or undocked. Two-player mode always uses separate "
+                                  "controllers.",
+    [UI_MENU_CONSOLE_DOCKED] = "Docked", [UI_MENU_CONSOLE_HANDHELD] = "Handheld",
+    [UI_MENU_PLAYER1_DEVICE] = "Player 1 input", [UI_MENU_PLAYER2_DEVICE] = "Player 2 input",
+    [UI_MENU_PLAYER_DEVICE_DESC] = "The device this player uses: a gamepad of any brand, or the keyboard and mouse. Each device "
+                                   "drives one player only. Auto takes the next free gamepad; player 1 also keeps the "
+                                   "keyboard and mouse unless another player chose them.",
+    [UI_MENU_PLAYER1_TYPE] = "Player 1 controller", [UI_MENU_PLAYER2_TYPE] = "Player 2 controller",
+    [UI_MENU_PLAYER_TYPE_DESC] = "The Switch controller the game sees for this player. Any gamepad works as either; Pro "
+                                 "Controller is the usual choice.",
+    [UI_MENU_DEVICE_AUTO] = "Auto", [UI_MENU_DEVICE_KEYBOARD] = "Keyboard and mouse", [UI_MENU_DEVICE_NONE] = "None",
+    [UI_MENU_DEVICE_MISSING] = "Gamepad not connected",
+    [UI_MENU_TYPE_PRO] = "Pro Controller", [UI_MENU_TYPE_DUAL] = "Joy-Con pair",
+    [UI_MENU_PLAYER2_OFF_NOTE] = "not connected",
 
     [UI_BINDS_HELP] = "Select a cell and press A or Enter, then the key, mouse button or controller button. Delete or "
                       "X clears a cell. A key in use moves here; a controller button swaps with the one it replaces.",
@@ -417,6 +438,24 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_STICK_DEADZONE_DESC] = "Насколько нужно отклонить стик геймпада, чтобы игра это заметила. Увеличьте, если персонаж или камера двигаются сами.",
     [UI_MENU_MOUSE_SENS] = "Чувствительность мыши",
     [UI_MENU_MOUSE_SENS_DESC] = "Как быстро мышь поворачивает камеру.",
+    [UI_MENU_PLAYERS] = "Игроки и консоль",
+    [UI_BINDS_PLAYER] = "Назначения для",
+    [UI_BINDS_PLAYER_DESC] = "Чьи кнопки меняют строки ниже. У каждого игрока свои назначения; выберите эту строку, чтобы "
+                             "переключиться между игроком 1 и игроком 2.",
+    [UI_BINDS_PLAYER_N] = "Игрок %d",
+    [UI_MENU_CONSOLE_MODE] = "Режим консоли",
+    [UI_MENU_CONSOLE_MODE_DESC] = "Стационарный или портативный режим, как если бы консоль стояла в док-станции или нет. "
+                                  "Переключение во время игры сообщает игре о подключении или отключении док-станции.",
+    [UI_MENU_CONSOLE_DOCKED] = "Стационарный", [UI_MENU_CONSOLE_HANDHELD] = "Портативный",
+    [UI_MENU_PLAYER1_DEVICE] = "Ввод игрока 1", [UI_MENU_PLAYER2_DEVICE] = "Ввод игрока 2",
+    [UI_MENU_PLAYER_DEVICE_DESC] = "Устройство этого игрока: геймпад любой марки или клавиатура с мышью. Каждое устройство "
+                                   "управляет только одним игроком. «Авто» берёт следующий свободный геймпад.",
+    [UI_MENU_PLAYER1_TYPE] = "Контроллер игрока 1", [UI_MENU_PLAYER2_TYPE] = "Контроллер игрока 2",
+    [UI_MENU_PLAYER_TYPE_DESC] = "Контроллер Switch, который видит игра для этого игрока.",
+    [UI_MENU_DEVICE_AUTO] = "Авто", [UI_MENU_DEVICE_KEYBOARD] = "Клавиатура и мышь", [UI_MENU_DEVICE_NONE] = "Нет",
+    [UI_MENU_DEVICE_MISSING] = "Геймпад не подключён",
+    [UI_MENU_TYPE_PRO] = "Pro Controller", [UI_MENU_TYPE_DUAL] = "Пара Joy-Con",
+    [UI_MENU_PLAYER2_OFF_NOTE] = "не подключён",
 
     [UI_BINDS_HELP] = "Выберите ячейку и нажмите A или Enter, затем клавишу, кнопку мыши или кнопку контроллера. "
                       "Delete или X очищает ячейку. Занятая клавиша переходит сюда; кнопка контроллера меняется "

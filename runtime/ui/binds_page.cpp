@@ -25,6 +25,15 @@ static_assert(UI_PAD_RPADDLE2 - UI_PAD_SOUTH == PAD_RPADDLE2 - PAD_SOUTH && PAD_
               "UI_PAD_* follow the pad ids");
 
 enum { CAPTURE_SECONDS = 5 };
+// The player whose bindings the rows show and change (co-op: each player has its own, input_map_player).
+static int g_player;
+
+// The setting name of action's line for the player shown, without TOTK_ (BIND_A, P2_BIND_A).
+static void bind_key(int action, char *out, size_t n) {
+    char var[40];
+    input_bind_var(g_player, action, var, sizeof var);
+    snprintf(out, n, "%s", var + 5);
+}
 // The capture window stays this long after the press: the press and its click reach ImGui a frame or two later and must
 // land on the window, not on a cell (a new capture), on Continue or as Esc closing the menu.
 static const uint64_t kDoneNs = 350000000ull;
@@ -110,7 +119,7 @@ static int shown_layout(void) {
 static void write_lines(const InputMap *m) {
     for (int a = 0; a < ACTION_COUNT; a++) {
         char var[40], line[256];
-        snprintf(var, sizeof var, "TOTK_BIND_%s", input_action_name(a));
+        input_bind_var(g_player, a, var, sizeof var);
         input_map_line(m, a, line, sizeof line);
         const char *now = cfg_get(var);
         if (!strcmp(line, now ? now : "")) continue;
@@ -120,7 +129,7 @@ static void write_lines(const InputMap *m) {
             const char *k = var + 5;
             cfg_reset(&k, 1);
         }
-        rt_log("menu: bind_%s = %s", input_action_name(a), line[0] ? line : "(default)");
+        rt_log("menu: player %d bind_%s = %s", g_player + 1, input_action_name(a), line[0] ? line : "(default)");
     }
     opt_save_soon();
 }
@@ -134,7 +143,7 @@ static void set_note(int action, UiTextId fmt, const char *a, const char *b) {
 // cell 0, 1: a key (KEY_NONE clears it); 2: a gamepad button (PAD_NONE clears it).
 static void change(int action, int cell, int id) {
     InputMap m;
-    input_map_snapshot(&m);
+    input_map_snapshot_player(g_player, &m);
     char buf[48];
     if (cell < 2) {
         int lost = input_map_set_key(&m, action, cell, id);
@@ -147,16 +156,16 @@ static void change(int action, int cell, int id) {
 }
 
 static void reset_binds(void) {
-    char names[ACTION_COUNT][32];
+    char names[ACTION_COUNT][40];
     const char *keys[ACTION_COUNT];
     for (int a = 0; a < ACTION_COUNT; a++) {
-        snprintf(names[a], sizeof names[a], "BIND_%s", input_action_name(a));
+        bind_key(a, names[a], sizeof names[a]);
         keys[a] = names[a];
     }
     int n = cfg_reset(keys, ACTION_COUNT);
     opt_save_soon();
     g_note_action = -1;
-    rt_log("menu: reset %d button bindings", n);
+    rt_log("menu: reset %d button bindings of player %d", n, g_player + 1);
 }
 
 static void row_action(int a, const InputMap &m, int layout) {
@@ -169,8 +178,8 @@ static void row_action(int a, const InputMap &m, int layout) {
                             : np           ? pad_label(p[0])
                                            : ""};
     const bool enabled[3] = {true, true, a < B_SL_LEFT};   // the sticks stay sticks
-    char key[32];
-    snprintf(key, sizeof key, "BIND_%s", input_action_name(a));
+    char key[40];
+    bind_key(a, key, sizeof key);
     const char *note = g_note_action == a && plat_now_ns() < g_note_until ? g_note : nullptr;
     int r = opt_bind_row(key, action_label(a), action_desc(a), cells, enabled, note);
     if (g_cap.action >= 0 || r < 0) return;
@@ -211,8 +220,9 @@ static void capture_window(void) {
         ImGui::TextDisabled("%s", t);
         if (g_cap.done && now - g_cap.done > kDoneNs) {
             ImGui::CloseCurrentPopup();
-            char id[48];
-            snprintf(id, sizeof id, "BIND_%s#%d", input_action_name(g_cap.action), g_cap.cell);
+            char key[40], id[48];
+            bind_key(g_cap.action, key, sizeof key);
+            snprintf(id, sizeof id, "%s#%d", key, g_cap.cell);
             opt_focus_key(id);   // back on the cell it came from
             g_cap.action = -1;
         }
@@ -226,9 +236,16 @@ static bool g_reset_asked;   // the reset row was chosen this frame (acted on af
 
 void binds_rows(float scale) {
     InputMap m;
-    input_map_snapshot(&m);
+    input_map_snapshot_player(g_player, &m);
     int layout = shown_layout();
     opt_group(UI_BINDS_GROUP_BUTTONS);
+    // Which player's bindings the rows below show and change; A or a click switches player
+    char who[48];
+    snprintf(who, sizeof who, menu_text(UI_BINDS_PLAYER_N), g_player + 1);
+    if (opt_button("##binds_player", UI_BINDS_PLAYER, UI_BINDS_PLAYER_DESC, who) && g_cap.action < 0) {
+        g_player = (g_player + 1) % INPUT_PLAYERS;
+        g_note_action = -1;
+    }
     opt_text(UI_BINDS_HELP);
     opt_bind_header(UI_BINDS_COL_KEY1, UI_BINDS_COL_KEY2, UI_BINDS_COL_PAD);
     for (int a : kButtons) row_action(a, m, layout);

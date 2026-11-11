@@ -6,6 +6,15 @@
 // Down=15) and the stick directions (StickLLeft..Down 16-19, StickRLeft..Down 20-23, derived from the sticks).
 // Sticks are -32767..32767, up is +y. TOTK_INPUT=none reports no input. Callable from any thread.
 void input_poll(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry);
+// Players (co-op): each player's controller reads only the devices assigned to it (TOTK_PLAYER<n>_DEVICE: auto, keyboard,
+// a gamepad, none), so one player's input never reaches another. input_poll is player 1. Returns 1 when the player has
+// a device (player 1 always). Blocked like input_poll while a text entry or the menu is open.
+enum { INPUT_PLAYERS = 2 };
+int input_poll_player(int player, uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry);
+int input_player_connected(int player);
+// The connected gamepads as player device choices for the menu: the TOTK_PLAYER<n>_DEVICE value and a display name.
+typedef struct { char value[64]; char name[80]; } InputDeviceChoice;
+int input_device_choices(InputDeviceChoice *out, int max);
 // The same for host UI (the text entry): never blocked. input_block(1) while a text entry is open: input_poll then
 // reports nothing; input_block(0) when it closes: nothing until all buttons and stick directions are released.
 void input_poll_ui(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry);
@@ -33,6 +42,7 @@ int input_pad_label(int pad);
 enum { INPUT_CAPTURE_NONE, INPUT_CAPTURE_KEY, INPUT_CAPTURE_PAD, INPUT_CAPTURE_CANCEL };
 struct InputMap;   // input_map.h (not included here: swkbd_win.c has button names of its own)
 void input_map_snapshot(struct InputMap *m);
+void input_map_snapshot_player(int player, struct InputMap *m);   // that player's tables (co-op)
 int input_capture(int reset, int *id);
 // The character on a punctuation key (KEY_MINUS..KEY_GRAVE) in the keyboard layout in use, 0 for another key.
 uint32_t input_key_char(int key);
@@ -48,6 +58,7 @@ int input_cursor_released(void);   // Esc or a non-client activation released th
 // Rumble: SDL_RumbleGamepad on the open gamepad, low (heavy, left) and high (light, right) motor 0..65535 for ms
 // milliseconds. 1 if a gamepad with rumble took it. Callable from any thread.
 int input_rumble(uint16_t low, uint16_t high, uint32_t ms);
+int input_rumble_player(int player, uint16_t low, uint16_t high, uint32_t ms);   // that player's gamepads
 // Motor value for a normalised amplitude: pow(a, curve) * strength, saturated to 0..65535. Pure.
 uint16_t rumble_motor(float a, float curve, float strength);
 // TOTK_RUMBLE_TRIGGERS=1: input_rumble also drives the impulse triggers (Xbox) with the high motor's value.
@@ -72,6 +83,7 @@ _Static_assert(sizeof(MotionState) == 0x60, "SixAxisSensorState ABI");
 typedef struct MotionFusion MotionFusion;
 MotionFusion *motion_new(void);
 MotionFusion *motion_global(void);   // the gamepad's, fed by input_win.c
+MotionFusion *input_motion_player(int player);   // player 1: motion_global(); fed from that player's gamepad
 void motion_feed(MotionFusion *m, const double acc_g[3], const double gyro_rad_s[3], uint64_t now_ns);
 int motion_read(MotionFusion *m, MotionState *out, int max, uint64_t now_ns);   // newest first; 0 = none in 200 ms
 void motion_restart(MotionFusion *m);   // angle and direction start over at the next sample

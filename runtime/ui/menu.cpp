@@ -686,8 +686,51 @@ static const char *pad_layout_note(void) {
     return note;
 }
 
+// A player's input device (input.c assign): Auto, the keyboard and mouse, each connected gamepad by name, and None for
+// player 2. A saved gamepad that is not connected keeps its value and shows as such.
+static void row_player_device(int p) {
+    enum { MAX = 12 };
+    InputDeviceChoice pads[8];
+    int npads = input_device_choices(pads, 8);
+    const char *vals[MAX], *names[MAX];
+    int n = 0;
+    vals[n] = "auto", names[n++] = menu_text(UI_MENU_DEVICE_AUTO);
+    vals[n] = "keyboard", names[n++] = menu_text(UI_MENU_DEVICE_KEYBOARD);
+    for (int i = 0; i < npads && n < MAX - 2; i++) vals[n] = pads[i].value, names[n++] = pads[i].name;
+    if (p > 0) vals[n] = "none", names[n++] = menu_text(UI_MENU_DEVICE_NONE);
+    char key[32];
+    snprintf(key, sizeof key, "TOTK_PLAYER%d_DEVICE", p + 1);
+    const char *now = cfg_value(key);
+    int cur = -1;
+    for (int i = 0; i < n; i++)
+        if (!strcmp(vals[i], now)) cur = i;
+    static char missing[INPUT_PLAYERS][64];
+    if (cur < 0 && !strncmp(now, "pad:", 4)) {
+        snprintf(missing[p], sizeof missing[p], "%s", now);
+        vals[n] = missing[p], names[n] = menu_text(UI_MENU_DEVICE_MISSING), cur = n++;
+    }
+    const char *note = p > 0 && !input_player_connected(p) ? menu_text(UI_MENU_PLAYER2_OFF_NOTE) : nullptr;
+    opt_choice_list(key, p ? UI_MENU_PLAYER2_DEVICE : UI_MENU_PLAYER1_DEVICE, vals, names, n, UI_MENU_PLAYER_DEVICE_DESC,
+                    cur, note);
+}
+
+// Players (co-op, two Switch controllers fed by separate devices) and the console mode (docked / handheld, live).
+static void players_rows() {
+    opt_group(UI_MENU_PLAYERS);
+    static const UiTextId mode[] = {UI_MENU_CONSOLE_DOCKED, UI_MENU_CONSOLE_HANDHELD};
+    opt_choice("TOTK_OPERATION_MODE", UI_MENU_CONSOLE_MODE, mode, 2, UI_MENU_CONSOLE_MODE_DESC);
+    static const UiTextId types[] = {UI_MENU_TYPE_PRO, UI_MENU_TYPE_DUAL};
+    for (int p = 0; p < INPUT_PLAYERS; p++) {
+        row_player_device(p);
+        opt_choice(p ? "TOTK_PLAYER2_TYPE" : "TOTK_PLAYER1_TYPE", p ? UI_MENU_PLAYER2_TYPE : UI_MENU_PLAYER1_TYPE, types, 2,
+                   UI_MENU_PLAYER_TYPE_DESC);
+    }
+    opt_group(UI_MENU_TAB_CONTROLS);
+}
+
 static void tab_controls(float scale) {
     opt_begin("##controls", scale);
+    players_rows();
     static const UiTextId layout[] = {UI_MENU_PAD_LAYOUT_AUTO, UI_MENU_PAD_LAYOUT_NINTENDO, UI_MENU_PAD_LAYOUT_XBOX,
                                       UI_MENU_PAD_LAYOUT_XBOX_PROMPTS};
     opt_choice("TOTK_PAD_LAYOUT", UI_MENU_PAD_LAYOUT, layout, 4, UI_MENU_PAD_LAYOUT_DESC, pad_layout_note());
