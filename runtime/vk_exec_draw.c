@@ -971,11 +971,13 @@ static int program_stage_lookup(const prog_t *p, unsigned stage, NVNshaderData *
 }
 
 // A compute shader is translated synchronously at its first dispatch (a skipped dispatch changes results), and the
-// largest (30000 instructions) take seconds each: a new scene's first frame froze for all of them in turn. Their
-// translation starts when the game registers the program, usually while the scene loads, on the background workers
-// (TOTK_XLATE_PREFETCH=0: at the dispatch only). The only answers a compute stage takes from the bound state are
-// texture types; the guess is a buffer texture in every slot, what this game's large compute shaders read. A wrong
-// guess costs only that background work: the dispatch then translates as before. Called on a guest thread.
+// largest (30000 instructions) take seconds each: a new scene's first frame froze for all of them in turn. Compute
+// stages (about 140) start translating when the game registers the program, at boot, behind every translation a draw
+// or dispatch asks for (TOTK_XLATE_PREFETCH=0: at first use only). Graphics stages are not: the game registers about
+// 15000 of them, a minute and a half of translation that kept the compute ones waiting. The answers are guessed: a
+// buffer texture in every slot (what this game's shaders read) and the program's local size. A dispatch takes the
+// result when it agrees on everything the translation read (gfx_shader.c alt_get); a wrong guess costs only that
+// background work. Called on a guest thread.
 void vk_exec_program_registered(const prog_t *p) {
     static int on = -1;
     static volatile int64_t queued;
@@ -990,7 +992,7 @@ void vk_exec_program_registered(const prog_t *p) {
             uint32_t actual;
             if (!nvn2_lower(ctl, code, &lc, &lk)) continue;
             memcpy(&actual, lc + 0x714, 4), memcpy(&len, lc + 0x704, 4);
-            if (actual != NVN_STAGE_CS || !len) continue;
+            if (actual != st || !len) continue;
             ctl = lc, code = lk;
         }
         GfxShaderAnswers a;
@@ -1002,8 +1004,7 @@ void vk_exec_program_registered(const prog_t *p) {
         }
         memset(a.tex_type, GFX_TEX_BUFFER, sizeof a.tex_type);
         if (gfx_shader_prefetch(GFX_STAGE_CS, ctl, code, len, &a) && plat_inc64(&queued) % 16 == 1)
-            rt_log("vk_exec: %lld compute shaders queued for translation at program registration",
-                   (long long)queued);
+            rt_log("vk_exec: %lld compute shaders queued for translation at program registration", (long long)queued);
     }
 }
 

@@ -1995,7 +1995,8 @@ static void dump_failed_request(const char *hex, const char *request, const char
 // the translation read either kind (UseMask), so a guess right about everything the translation read can still name
 // another key: in this game every compute dispatch has a 2D image at slot 0, whose texture type alone the large compute
 // shaders read. A request takes the prefetched shader of its code when the answers agree on the texture types of
-// tex_queried, the image types and formats of img_queried and every other field; the SPIR-V depends on nothing else.
+// tex_queried, the image types and formats of img_queried, the vertex input types of a VS's input Locations, the
+// output types of an FS's outputs (UseMask) and every other field; the SPIR-V depends on nothing else.
 #define ALT_N 1024
 static struct { uint8_t code_hash[32]; GfxShaderAnswers a; const GfxShader *s; } alt[ALT_N];
 static PlatMutex alt_lock = PLAT_MUTEX_INIT;
@@ -2023,11 +2024,19 @@ static const GfxShader *alt_get(const Req *r, const GfxShaderAnswers *a) {
         if ((tq >> k & 1) && a->tex_type[k] != have.tex_type[k]) return NULL;
         if ((iq >> k & 1) && (a->img_type[k] != have.img_type[k] || a->img_format[k] != have.img_format[k])) return NULL;
     }
-    GfxShaderAnswers x = *a, y = have;                     // everything but the per-slot types agrees exactly
+    uint32_t attrs = sh->stage == GFX_STAGE_VS ? sh->in_mask : 0, fouts = sh->stage == GFX_STAGE_FS ? sh->out_mask & 0xff : 0;
+    for (int k = 0; k < 32; k++)
+        if ((attrs >> k & 1) && a->attr_type[k] != have.attr_type[k]) return NULL;
+    for (int k = 0; k < 8; k++)
+        if ((fouts >> k & 1) && a->frag_out_type[k] != have.frag_out_type[k]) return NULL;
+    GfxShaderAnswers x = *a, y = have;                     // everything but those agrees exactly
     memset(x.tex_type, 0, sizeof x.tex_type), memset(x.img_type, 0, sizeof x.img_type);
     memset(x.img_format, 0, sizeof x.img_format);
     memset(y.tex_type, 0, sizeof y.tex_type), memset(y.img_type, 0, sizeof y.img_type);
     memset(y.img_format, 0, sizeof y.img_format);
+    if (sh->stage == GFX_STAGE_VS) memset(x.attr_type, 0, sizeof x.attr_type), memset(y.attr_type, 0, sizeof y.attr_type);
+    if (sh->stage == GFX_STAGE_FS)
+        memset(x.frag_out_type, 0, sizeof x.frag_out_type), memset(y.frag_out_type, 0, sizeof y.frag_out_type);
     if (memcmp(&x, &y, sizeof x)) return NULL;
     return sh;
 }
@@ -2130,6 +2139,7 @@ static struct {
     PlatMutex lock;
     PlatCond work, done;                         // done: a job finished (gfx_shader_await)
     XJob *head, *tail;
+    XJob *dtail;                                           // the last demand job: they come first, prefetches after
     XWait *waits[256];
     int started;                                           // 1 running, -1 no thread could be created
 } X = {PLAT_MUTEX_INIT, PLAT_COND_INIT, PLAT_COND_INIT};
@@ -2208,6 +2218,7 @@ static void xlate_worker(void *arg) {
         while (!X.head) plat_cond_wait(&X.work, &X.lock);
         XJob *j = X.head;
         if (!(X.head = j->next)) X.tail = NULL;
+        if (X.dtail == j) X.dtail = NULL;
         plat_mutex_unlock(&X.lock);
         job_run(j);
     }
@@ -2236,6 +2247,7 @@ static const GfxShader *get_async_one(Req r, int stage, const uint8_t *control, 
     if (!cache_dir[0]) return fail("no cache directory", NULL);
     if (r.final && (s = request_disk_load(&r, r.key, r.iid))) return plat_inc64(&n_hits), mem_insert(s);
 
+    if (!t_prefetch) drop_prefetched(r.code_hash);
     XJob *j = calloc(1, sizeof *j);
     XWait *e = calloc(1, sizeof *e);
     uint8_t *ctl = malloc(CONTROL_SIZE), *cd = malloc(r.length);
@@ -2258,15 +2270,23 @@ static const GfxShader *get_async_one(Req r, int stage, const uint8_t *control, 
         j->r.c1 = cd + (r.length - r.c1_len);
         memcpy(e->key, r.key, 32);
         *slot = e;
-        if (X.tail) X.tail->next = j;
-        else X.head = j;
-        X.tail = j;
+        if (j->prefetch) {                                 // behind everything a draw or dispatch asked for
+            if (X.tail) X.tail->next = j;
+            else X.head = j;
+            X.tail = j;
+        } else {                                           // after the last demand job, ahead of the prefetches
+            if (X.dtail) j->next = X.dtail->next, X.dtail->next = j;
+            else j->next = X.head, X.head = j;
+            if (X.tail == X.dtail) X.tail = j;
+            X.dtail = j;
+        }
         plat_cond_signal(&X.work);
     }
     plat_mutex_unlock(&X.lock);
     if (queued) return *pending = 1, NULL;
     free(j), free(e), free(ctl), free(cd);
     if (raced) return *pending = 1, NULL;
+    if (t_prefetch) return NULL;                           // a prefetch never translates on the calling thread
     return translate(&r, stage, control, code, a);         // no worker or out of memory
 }
 
@@ -2284,6 +2304,7 @@ const GfxShader *gfx_shader_await(int stage, const uint8_t *control, const uint8
             if (prev) prev->next = j->next;
             else X.head = j->next;
             if (X.tail == j) X.tail = prev;
+            if (X.dtail == j) X.dtail = prev;              // a demand job's predecessor is one too
             mine = j;
             break;
         }
