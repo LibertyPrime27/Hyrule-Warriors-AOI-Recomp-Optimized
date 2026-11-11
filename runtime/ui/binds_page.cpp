@@ -235,16 +235,18 @@ bool binds_modal(void) { return g_cap.action >= 0; }
 static bool g_reset_asked;   // the reset row was chosen this frame (acted on after the page)
 
 void binds_rows(float scale) {
+    g_player = strcmp(cfg_value("TOTK_BINDS_PLAYER"), "2") ? 0 : 1;
     InputMap m;
     input_map_snapshot_player(g_player, &m);
     int layout = shown_layout();
     opt_group(UI_BINDS_GROUP_BUTTONS);
     // Which player's bindings the rows below show and change; A or a click switches player
-    char who[48];
-    snprintf(who, sizeof who, menu_text(UI_BINDS_PLAYER_N), g_player + 1);
-    if (opt_button("##binds_player", UI_BINDS_PLAYER, UI_BINDS_PLAYER_DESC, who) && g_cap.action < 0) {
-        g_player = (g_player + 1) % INPUT_PLAYERS;
-        g_note_action = -1;
+    static const UiTextId who[] = {UI_BINDS_PLAYER_1, UI_BINDS_PLAYER_2};
+    if (opt_choice("TOTK_BINDS_PLAYER", UI_BINDS_PLAYER, who, 2, UI_BINDS_PLAYER_DESC)) g_note_action = -1;
+    int shown = strcmp(cfg_value("TOTK_BINDS_PLAYER"), "2") ? 0 : 1;
+    if (shown != g_player) {   // the rows below follow at once
+        g_player = shown;
+        input_map_snapshot_player(g_player, &m);
     }
     opt_text(UI_BINDS_HELP);
     opt_bind_header(UI_BINDS_COL_KEY1, UI_BINDS_COL_KEY2, UI_BINDS_COL_PAD);

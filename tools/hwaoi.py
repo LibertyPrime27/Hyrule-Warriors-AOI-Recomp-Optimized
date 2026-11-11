@@ -272,8 +272,10 @@ def launch_interactive(args, identity):
     report_dir = local_output(ROOT / "work/reports" / datetime.now().strftime("interactive-%Y%m%d-%H%M%S-%f"), "reports")
     report_dir.mkdir(parents=True)
     env = dict(os.environ)
-    # Environment overrides take precedence over inherited ini/probe settings.
-    options = {"HWAOI_GPU": "vulkan", "HWAOI_FULLSCREEN": "0", "HWAOI_WINDOW_SIZE": "1280x720",
+    # Environment overrides take precedence over inherited ini/probe settings. Fullscreen and the window size are not
+    # forced: they are the player's settings (the Screen tab and F11 change them live, hwaoi.ini keeps them), and an
+    # environment value would lock those rows.
+    options = {"HWAOI_GPU": "vulkan",
                "HWAOI_INPUT": args.input_mode, "HWAOI_RUMBLE": "0", "HWAOI_PROGRESS": "1",
                "HWAOI_EXEFS": str(args.exefs.resolve()),
                "HWAOI_PROFILE_DIR": str(local_output(args.profile_dir, "saves")),

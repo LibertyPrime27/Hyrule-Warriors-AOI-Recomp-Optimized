@@ -152,8 +152,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_PLAYERS] = "Players and console",
     [UI_BINDS_PLAYER] = "Bindings for",
     [UI_BINDS_PLAYER_DESC] = "Whose buttons the rows below change. Each player has their own bindings, for their keyboard "
-                             "and their gamepad; select this row to switch between player 1 and player 2.",
-    [UI_BINDS_PLAYER_N] = "Player %d",
+                             "and their gamepad; change this row (left / right) to switch between player 1 and player 2.",
+    [UI_BINDS_PLAYER_1] = "Player 1", [UI_BINDS_PLAYER_2] = "Player 2",
     [UI_MENU_CONSOLE_MODE] = "Console mode",
     [UI_MENU_CONSOLE_MODE_DESC] = "Docked or handheld, as if the console were in or out of its dock. Switching while playing "
                                   "tells the game the console was docked or undocked. Two-player mode always uses separate "
@@ -442,7 +442,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_BINDS_PLAYER] = "Назначения для",
     [UI_BINDS_PLAYER_DESC] = "Чьи кнопки меняют строки ниже. У каждого игрока свои назначения; выберите эту строку, чтобы "
                              "переключиться между игроком 1 и игроком 2.",
-    [UI_BINDS_PLAYER_N] = "Игрок %d",
+    [UI_BINDS_PLAYER_1] = "Игрок 1", [UI_BINDS_PLAYER_2] = "Игрок 2",
     [UI_MENU_CONSOLE_MODE] = "Режим консоли",
     [UI_MENU_CONSOLE_MODE_DESC] = "Стационарный или портативный режим, как если бы консоль стояла в док-станции или нет. "
                                   "Переключение во время игры сообщает игре о подключении или отключении док-станции.",

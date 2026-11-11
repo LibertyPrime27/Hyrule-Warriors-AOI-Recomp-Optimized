@@ -78,7 +78,7 @@ typedef enum {
 
     // Controls tab: the remapping rows (ui/binds_page.cpp)
     UI_BINDS_HELP, UI_BINDS_COL_KEY1, UI_BINDS_COL_KEY2, UI_BINDS_COL_PAD,
-    UI_BINDS_PLAYER, UI_BINDS_PLAYER_DESC, UI_BINDS_PLAYER_N,
+    UI_BINDS_PLAYER, UI_BINDS_PLAYER_DESC, UI_BINDS_PLAYER_1, UI_BINDS_PLAYER_2,
     UI_BINDS_GROUP_BUTTONS, UI_BINDS_GROUP_MOVE, UI_BINDS_GROUP_CAMERA,
     UI_BINDS_PRESS_KEY,       // "Press a key or mouse button for %s"
     UI_BINDS_PRESS_PAD,       // "Press a controller button for %s"
