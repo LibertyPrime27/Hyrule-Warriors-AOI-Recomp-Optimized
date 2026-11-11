@@ -3664,6 +3664,21 @@ static void op_draw_ind(VkExec *ex, const p_draw_ind *d) {
 
 // ---- dispatch and uniform buffer updates
 
+// The dispatch's shader and pipeline, both synchronous: this game's compute passes carry state from frame to frame, so
+// a skipped dispatch changes results (a skipped first exposure pass left the picture black). vk_pipeline_compute keeps
+// the wait short: pipelines are built ahead in the background, and a dispatch never compiles one twice.
+static VkPipeline compute_ready(VkExec *ex, const GfxShader **cs, const VkPipeInfo **info) {
+    int present;
+    *cs = shader_for(ex, NVN_STAGE_CS, &present, NULL, 0);
+    if (!*cs) return VK_NULL_HANDLE;
+    VkPipeline p = vk_pipeline_compute(*cs, info);
+    if (!p || !*info) {
+        warn_once(W_PIPELINE, "a compute pipeline could not be created: dispatches with it are skipped");
+        return VK_NULL_HANDLE;
+    }
+    return p;
+}
+
 static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     if (d->x <= 0 || d->y <= 0 || d->z <= 0) return;
     static int skip = -1;   // DKB_SKIP_COMPUTE=1: drop every direct dispatch (bisecting GPU faults)
@@ -3672,12 +3687,10 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     if (!ex->prog) return warn_once(W_PROGRAM, "a dispatch without a bound program is skipped");
     cb_res(ex);
     dummies_init();
-    int present;
-    const GfxShader *cs = shader_for(ex, NVN_STAGE_CS, &present, NULL, 0);   // synchronous: a skipped dispatch changes results
-    if (!cs) return;
     const VkPipeInfo *info = NULL;
-    VkPipeline p = vk_pipeline_compute(cs, &info);
-    if (!p || !info) return warn_once(W_PIPELINE, "a compute pipeline could not be created: dispatches with it are skipped");
+    const GfxShader *cs;
+    VkPipeline p = compute_ready(ex, &cs, &info);
+    if (!p) return;
     vk_exec_barrier(ex);   // ends the pass; earlier writes are visible to the shader
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_COMPUTE, p);
     c0_dim[0] = (uint32_t)d->x, c0_dim[1] = (uint32_t)d->y, c0_dim[2] = (uint32_t)d->z;
@@ -3701,12 +3714,10 @@ static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
         return warn_once(W_INDIRECT, "indirect dispatch arguments at %#llx are not backed or not aligned: skipped", (unsigned long long)d->ind);
     cb_res(ex);
     dummies_init();
-    int present;
-    const GfxShader *cs = shader_for(ex, NVN_STAGE_CS, &present, NULL, 0);
-    if (!cs) return;
     const VkPipeInfo *info = NULL;
-    VkPipeline p = vk_pipeline_compute(cs, &info);
-    if (!p || !info) return warn_once(W_PIPELINE, "a compute pipeline could not be created: dispatches with it are skipped");
+    const GfxShader *cs;
+    VkPipeline p = compute_ready(ex, &cs, &info);
+    if (!p) return;
     vk_exec_barrier(ex);
     VK_MEM_USE(ip);
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_COMPUTE, p);

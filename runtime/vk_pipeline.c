@@ -3148,36 +3148,71 @@ static struct {
     PlatMutex stat;
 } LB = {.stat = PLAT_MUTEX_INIT};
 
+static int csp_claim_or_wait(const GfxShader *cs);
+
+// A dispatch's compute pipeline. It must exist before the dispatch runs: this game's compute passes carry state from
+// frame to frame (exposure, simulations), so a skipped first dispatch left the picture black for good (measured). A
+// new compute shader can take the driver seconds (a new move's effects: 8.9 and 13.4 s freezes), so they are built
+// ahead in the background (gfx_shader_prefetched). A dispatch whose pipeline the background is building waits for that
+// build instead of compiling it a second time; one still only queued is taken over and built here. Either way it is
+// built outside P.lock, which every other pipeline lookup (draws, background workers) needs meanwhile.
 VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info) {
     if (info) *info = NULL;
     if (!cs || !ensure_init()) return VK_NULL_HANDLE;
     struct { const GfxShader *cs; uint32_t compute; } k = {cs, 1};
     uint64_t h = key_hash(&k, sizeof k);
-    plat_mutex_lock(&P.lock);
-    Pipe *p = pipe_find(&k, sizeof k, h);
-    if (p) {
-        P.stats.hits++;
-    } else {
+    Pipe *p;
+    for (int round = 0;; round++) {
+        plat_mutex_lock(&P.lock);
+        p = pipe_find(&k, sizeof k, h);
+        if (p) {
+            P.stats.hits++;
+            plat_mutex_unlock(&P.lock);
+            break;
+        }
+        plat_mutex_unlock(&P.lock);
+        if (!round) {
+            uint64_t w0 = perf_begin();
+            int waited = csp_claim_or_wait(cs);
+            perf_end(PERF_PIPE, w0);
+            if (waited) continue;   // the background build finished: look again
+        }
+        plat_mutex_lock(&P.lock);
+        p = pipe_find(&k, sizeof k, h);
+        if (p) {
+            P.stats.hits++;
+            plat_mutex_unlock(&P.lock);
+            break;
+        }
         const char *why = NULL;
         Bindings B = {0};
         Layout *l = compute_layout(cs, &B, &why);
         VkPipeline pipe = VK_NULL_HANDLE;
         if (!why) {
+            plat_mutex_unlock(&P.lock);
             uint64_t p0 = perf_begin();
             pipe = compute_create(cs, l);
             perf_end(PERF_PIPE, p0);
+            plat_mutex_lock(&P.lock);
             if (!pipe) why = "pipeline creation failed";
+            else if ((p = pipe_find(&k, sizeof k, h))) {   // built elsewhere meanwhile
+                vkDestroyPipeline(P.device, pipe, NULL);
+                P.stats.hits++;
+            }
         }
-        if (why) {
-            P.stats.failures++;
-            rt_log("vk_pipeline: compute pipeline not built: %s", why);
-        } else {
-            P.stats.compute++;
-            LB.cs_draw++;
+        if (!p) {
+            if (why) {
+                P.stats.failures++;
+                rt_log("vk_pipeline: compute pipeline not built: %s", why);
+            } else {
+                P.stats.compute++;
+                LB.cs_draw++;
+            }
+            p = pipe_add(&k, sizeof k, h, pipe, l, l ? &B : NULL, VK_PIPELINE_BIND_POINT_COMPUTE, 0);
         }
-        p = pipe_add(&k, sizeof k, h, pipe, l, l ? &B : NULL, VK_PIPELINE_BIND_POINT_COMPUTE, 0);
+        plat_mutex_unlock(&P.lock);
+        break;
     }
-    plat_mutex_unlock(&P.lock);
     if (!p) return VK_NULL_HANDLE;
     if (info) *info = &p->info;
     return p->info.pipeline;
@@ -3186,6 +3221,154 @@ VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info) {
 static void lb_lock(void) {
     plat_thread_priority(PLAT_PRIO_NORMAL);
     plat_mutex_lock(&P.lock);
+}
+
+// ---- compute pipelines built ahead (gfx_shader_prefetched). The game registers its programs well before it uses them;
+// their compute shaders already translate then (vk_exec_program_registered), and here their pipelines follow on
+// CSP_THREADS below-normal threads, so a new move's first dispatch finds its pipeline ready instead of building it for
+// seconds on the replay thread (vk_pipeline_compute waits for one being built, or takes over one still queued).
+// TOTK_CS_PREBUILD=0 turns it off.
+#define CSP_MAX 4096
+#define CSP_THREADS 2
+static struct {
+    PlatMutex lock;
+    PlatCond more, done;
+    const GfxShader *q[CSP_MAX];                 // NULL: taken over by a dispatch
+    uint32_t head, n;
+    const GfxShader *busy[CSP_THREADS];          // being built by each thread
+    int started, off;
+    volatile int64_t built, had, failed, dropped, waits, taken;
+    double ms, max_ms;
+    const GfxShader *queued[CSP_MAX * 2];        // open addressing: queued or being built, so each is queued once
+} CSP = {PLAT_MUTEX_INIT, PLAT_COND_INIT, PLAT_COND_INIT};
+
+static uint32_t csp_slot(const GfxShader *cs) {   // CSP.lock held
+    uint32_t i = (uint32_t)(((uintptr_t)cs >> 4) * 0x9e3779b1u) & (CSP_MAX * 2 - 1);
+    while (CSP.queued[i] && CSP.queued[i] != cs) i = (i + 1) & (CSP_MAX * 2 - 1);
+    return i;
+}
+
+static void csp_unqueue(const GfxShader *cs) {   // CSP.lock held: removal with backward-shift
+    uint32_t i = csp_slot(cs);
+    if (CSP.queued[i] != cs) return;
+    CSP.queued[i] = NULL;
+    for (uint32_t j = (i + 1) & (CSP_MAX * 2 - 1); CSP.queued[j]; j = (j + 1) & (CSP_MAX * 2 - 1)) {
+        const GfxShader *m = CSP.queued[j];
+        CSP.queued[j] = NULL;
+        CSP.queued[csp_slot(m)] = m;
+    }
+}
+
+static void csp_build(const GfxShader *cs) {
+    struct { const GfxShader *cs; uint32_t compute; } k = {cs, 1};
+    uint64_t h = key_hash(&k, sizeof k);
+    Bindings B = {0};
+    const char *why = NULL;
+    plat_mutex_lock(&P.lock);
+    Layout *l = pipe_find(&k, sizeof k, h) ? NULL : compute_layout(cs, &B, &why);
+    int have = !l && !why;
+    plat_mutex_unlock(&P.lock);
+    if (!l) {
+        plat_inc64(have ? &CSP.had : &CSP.failed);
+        return;
+    }
+    double t0 = now_ms();
+    VkPipeline pipe = compute_create(cs, l);
+    double ms = now_ms() - t0;
+    plat_mutex_lock(&P.lock);
+    if (pipe && !pipe_find(&k, sizeof k, h)) {
+        pipe_add(&k, sizeof k, h, pipe, l, &B, VK_PIPELINE_BIND_POINT_COMPUTE, 0);
+        P.stats.compute++;
+        CSP.ms += ms;
+        if (ms > CSP.max_ms) CSP.max_ms = ms;
+        plat_mutex_unlock(&P.lock);
+        int64_t n = plat_inc64(&CSP.built);
+        if (n <= 4 || !(n & (n - 1)))
+            rt_log("vk_pipeline: %lld compute pipelines built ahead of their first dispatch (avg %.1f ms, max %.1f ms); "
+                   "dispatches waited for %lld and built %lld still queued themselves; %lld there already, %lld failed, "
+                   "%lld not queued (TOTK_CS_PREBUILD=0 turns it off)", (long long)n, CSP.ms / (double)n, CSP.max_ms,
+                   (long long)CSP.waits, (long long)CSP.taken, (long long)CSP.had, (long long)CSP.failed,
+                   (long long)CSP.dropped);
+        return;
+    }
+    plat_mutex_unlock(&P.lock);
+    if (pipe) vkDestroyPipeline(P.device, pipe, NULL), plat_inc64(&CSP.had);
+    else plat_inc64(&CSP.failed);
+}
+
+static void csp_main(void *arg) {
+    int w = (int)(intptr_t)arg;
+    plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
+    for (;;) {
+        plat_mutex_lock(&CSP.lock);
+        while (!CSP.n) plat_cond_wait(&CSP.more, &CSP.lock);
+        const GfxShader *cs = CSP.q[CSP.head];
+        CSP.head = (CSP.head + 1) % CSP_MAX, CSP.n--;
+        if (!cs) {   // a dispatch took it over
+            plat_mutex_unlock(&CSP.lock);
+            continue;
+        }
+        CSP.busy[w] = cs;
+        plat_mutex_unlock(&CSP.lock);
+        csp_build(cs);
+        plat_mutex_lock(&CSP.lock);
+        CSP.busy[w] = NULL;
+        csp_unqueue(cs);
+        plat_mutex_unlock(&CSP.lock);
+        plat_cond_broadcast(&CSP.done);
+    }
+}
+
+// For a dispatch that found no pipeline: 1 after waiting for a background build of cs (look again), 0 when the caller
+// builds it (not queued, or queued and taken over here).
+static int csp_claim_or_wait(const GfxShader *cs) {
+    plat_mutex_lock(&CSP.lock);
+    int waited = 0;
+    for (;;) {
+        int building = 0;
+        for (int w = 0; w < CSP_THREADS; w++) building |= CSP.busy[w] == cs;
+        if (!building) break;
+        waited = 1;
+        plat_cond_wait(&CSP.done, &CSP.lock);
+    }
+    if (waited) plat_inc64(&CSP.waits);
+    else if (CSP.queued[csp_slot(cs)] == cs) {
+        for (uint32_t i = 0; i < CSP.n; i++)
+            if (CSP.q[(CSP.head + i) % CSP_MAX] == cs) CSP.q[(CSP.head + i) % CSP_MAX] = NULL;
+        csp_unqueue(cs);
+        plat_inc64(&CSP.taken);
+    }
+    plat_mutex_unlock(&CSP.lock);
+    return waited;
+}
+
+void gfx_shader_prefetched(const GfxShader *cs) {
+    // Only once pipelines are set up (never starts Vulkan from a translator thread); before that the dispatch builds it.
+    if (!cs || gfx_shader_stage(cs) != GFX_STAGE_CS || !__atomic_load_n(&P.ready, __ATOMIC_ACQUIRE)) return;
+    plat_mutex_lock(&CSP.lock);
+    if (!CSP.started) {
+        CSP.started = 1;
+        const char *e = cfg_get("TOTK_CS_PREBUILD");
+        CSP.off = e && !strcmp(e, "0");
+        int threads = 0;
+        for (int w = 0; !CSP.off && w < CSP_THREADS; w++)
+            threads += plat_thread_spawn(csp_main, (void *)(intptr_t)w, "vk compute prebuild", 0) != 0;
+        if (!threads) CSP.off = 1;
+    }
+    int ok = 0;
+    if (!CSP.off) {
+        uint32_t i = csp_slot(cs);
+        if (CSP.queued[i] == cs) ok = 0;   // queued or building already
+        else if (CSP.n < CSP_MAX) {
+            CSP.queued[i] = cs;
+            CSP.q[(CSP.head + CSP.n++) % CSP_MAX] = cs;
+            ok = 1;
+        } else {
+            plat_inc64(&CSP.dropped);
+        }
+    }
+    plat_mutex_unlock(&CSP.lock);
+    if (ok) plat_cond_signal(&CSP.more);
 }
 
 static void lb_unlock(void) {
