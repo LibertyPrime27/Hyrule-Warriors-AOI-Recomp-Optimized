@@ -52,6 +52,10 @@ In the cave scene that was tested, the blank texture bindings went from **292 to
 ### Loading and stutter
 
 - **Shader pipelines build in the background**, from a pipeline key cache recorded on earlier runs. Draws whose pipeline is not ready yet are skipped instead of blocking the frame. This removes the emulator-style shader stutter and the long black stalls.
+- **No more long freeze the first time a scene loads.** With an empty shader cache, entering a new scene used to freeze the game for several seconds while shaders were translated one by one. Measured on the test PC, the worst frame went from **7.5 s to about 0.9 s**, a short hitch:
+  - Compute shaders, some of which take 1–2 seconds each to translate, start translating as soon as the game registers them at boot, so they are ready before the scene needs them.
+  - Shaders a frame is waiting for get their own translator and skip ahead of background work.
+  - The number of translator processes follows your CPU (2 to 6) and runs at below-normal priority, so it does not take CPU time from the game.
 - **Game files are verified once, not on every launch.** RomFS hash verification is saved in `romfs-verified.bin`, so later launches skip re-hashing unchanged game data. Scene loads are much shorter.
 
 ### Memory use (from upstream)
@@ -111,7 +115,7 @@ The 30 / 60 / 90 / 120 FPS settings are available, both in the compiler (**Allow
 
 ## Current status
 
-**Current version: 1.0.3 (November 10, 2026).** Version 1.0.3 adds two-player co-op with per-player input devices, controllers and bindings, plus a live docked/handheld switch. The game boots, plays the opening movies and reaches outdoor exploration and combat. A complete playthrough has not been verified.
+**Current version: 1.0.4 (November 10, 2026).** Version 1.0.4 removes the multi-second freeze when a scene loads for the first time (now a short hitch of about 0.9 s on the test PC). Version 1.0.3 added two-player co-op with per-player input devices, controllers and bindings, plus a live docked/handheld switch. The game boots, plays the opening movies and reaches outdoor exploration and combat. A complete playthrough has not been verified.
 
 | | Part | Progress |
 | --- | --- | --- |
